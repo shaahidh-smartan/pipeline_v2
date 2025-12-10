@@ -13,7 +13,7 @@ develop-eggs/
 dist/
 downloads/
 eggs/
-.eggs/f
+.eggs/
 lib/
 lib64/
 parts/
@@ -47,6 +47,7 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
+*.py,cover
 .hypothesis/
 .pytest_cache/
 
@@ -58,6 +59,7 @@ coverage.xml
 *.log
 local_settings.py
 db.sqlite3
+db.sqlite3-journal
 
 # Flask stuff:
 instance/
@@ -89,8 +91,12 @@ ipython_config.py
 #   install all needed dependencies.
 #Pipfile.lock
 
-# celery beat schedule file
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow
+__pypackages__/
+
+# Celery stuff
 celerybeat-schedule
+celerybeat.pid
 
 # SageMath parsed files
 *.sage.py
@@ -103,7 +109,6 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-bpbreid_venv/
 
 # Spyder project settings
 .spyderproject
@@ -123,59 +128,14 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Cython eval code
-*.c
-*.html
-
-# OS X
-.DS_Store
-.Spotlight-V100
-.Trashes
-._*
-
-# ReID
-reid-data/
-log/
-saved-models/
-model-zoo/
-pretrained_models/
-debug*
-/.idea/
-/configs_user/
-
-# Video files
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.flv
-*.wmv
-
-# Model files
-*.pt
+# output
+docs/api
+.code-workspace.code-workspace
+*.pkl
+*.npy
 *.pth
 *.onnx
-*.pkl
-*.h5
-*.pb
-
-# Gallery banks and embeddings
-gallery_bank/
-gallery_bank_*/
-
-# Large assets
-*.gif
-*.pdf
-
-# External dependencies
-detectron2/
-deep-person-reid/
-.env.runtime
-docs
-build
-bpbreid_venv
-.claude
-__pycache__
-gallery_bank_vijay
-unwanted
-gallery_venv
+*.engine
+events.out.tfevents*
+pretrained
+YOLOX_outputs
