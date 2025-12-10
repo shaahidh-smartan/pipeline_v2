@@ -179,3 +179,5 @@ __pycache__
 gallery_bank_vijay
 unwanted
 gallery_venv
+detectron2
+bpbreid_human_parsing_labels
