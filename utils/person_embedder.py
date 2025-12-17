@@ -109,7 +109,7 @@ class PersonEmbedder:
 
         return embeddings, visibility_scores
 
-    def extract_embedding(self, person_crop: np.ndarray) -> Optional[np.ndarray]:
+    def extract_embedding(self, person_crop: np.ndarray) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Extract embedding from a single person crop with thread-safe inference.
 
@@ -117,12 +117,14 @@ class PersonEmbedder:
             person_crop: RGB numpy array of person crop (H, W, 3)
 
         Returns:
-            Embedding as numpy array (1D vector) or None if extraction fails
+            Tuple of (embedding, visibility) as torch tensors or (None, None) if extraction fails
+            - embedding: [6, 512] tensor for 6 body parts
+            - visibility: [6] tensor for visibility scores
         """
         try:
             if person_crop is None or person_crop.size == 0:
                 print("[PersonEmbedder] Invalid person crop")
-                return None
+                return None, None
 
             # Thread-safe inference with explicit CUDA synchronization
             with self._inference_lock:
@@ -135,20 +137,22 @@ class PersonEmbedder:
                 model_output = self.extractor([person_crop])
 
                 # Extract embeddings and visibility scores
-                embeddings, _ = self.extract_test_embeddings(model_output)
+                embeddings, visibility_scores = self.extract_test_embeddings(model_output)
 
                 # Ensure CUDA synchronization after inference
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
 
-            # Convert to numpy and flatten (get first element since we passed a list)
-            embedding_np = embeddings[0].cpu().numpy().flatten()
+            # Return torch tensors (get first element since we passed a list)
+            # Keep the [6, 512] shape for BPBreID
+            embedding_tensor = embeddings[0]  # [6, 512]
+            visibility_tensor = visibility_scores[0]  # [6]
 
-            return embedding_np
+            return embedding_tensor, visibility_tensor
 
         except Exception as e:
             print(f"[PersonEmbedder] Error extracting embedding: {e}")
-            return None
+            return None, None
 
     def extract_embeddings_batch(self, person_crops: list) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
