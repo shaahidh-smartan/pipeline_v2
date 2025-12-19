@@ -103,7 +103,7 @@ class PersonEmbeddingCollector:
         self.display_height = self.camera_height
 
         # Processing configuration - Frame-based collection
-        self.detection_interval = 2  # Process every 3rd frame for detection
+        self.detection_interval = 3  # Process every 3rd frame for detection
 
         # Initialize cameras (only center and right)
         self.cameras = {
@@ -359,8 +359,14 @@ class PersonEmbeddingCollector:
                     if face_data.get('embedding') is None:
                         print(f"[FACE] No embedding extracted for detected face in {job.camera_id}")
                         continue
+
+                    # Convert similarity threshold to distance threshold
+                    # similarity = 1.0 / (1.0 + distance)
+                    # Solving for distance: distance = (1.0 / similarity) - 1.0
+                    distance_threshold = (1.0 / self.similarity_threshold) - 1.0
+
                     match, sim = self.similarity_search.find_face_match_euclidean(
-                        face_data['embedding'], threshold=self.similarity_threshold
+                        face_data['embedding'], threshold=distance_threshold
                     )
                     if match:
                         self.debug_counters['recognized_faces'] += 1

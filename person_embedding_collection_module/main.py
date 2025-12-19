@@ -39,13 +39,13 @@ def create_camera_config():
     return [
         {
             'name': 'Center Camera',
-            'url': 'rtsp://admin:admin%40123@192.168.0.216:554/stream1',
+            'url': 'rtsp://admin:admin%40123@192.168.0.110:554/stream1',
             'width': 640,
             'height': 640
         },
         {
             'name': 'Right Camera',
-            'url': 'rtsp://admin:admin%40123@192.168.0.110:554/stream1',
+            'url': 'rtsp://admin:admin%40123@192.168.0.216:554/stream1',
             'width': 640,
             'height': 640
         }
@@ -62,7 +62,7 @@ def main():
     Returns:
         None
     """
-    SIMILARITY_THRESHOLD = 0.69
+    SIMILARITY_THRESHOLD = 0.50
     TARGET_EMBEDDINGS_PER_PERSON = 25
     
     print("🎬 Person Embedding Collection Module")
