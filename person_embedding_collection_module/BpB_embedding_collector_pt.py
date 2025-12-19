@@ -68,10 +68,11 @@ class PersonEmbeddingCollector:
             device="cuda" if torch.cuda.is_available() else "cpu"
         )
 
-        # Set output directory relative to script location if not provided
+        # Set output directory - use shared location in repo root if not provided
         if output_dir is None:
-            script_dir = Path(__file__).parent.absolute()
-            self.output_dir = script_dir / 'embeddings_output'
+            # Use repo root for shared access between modules
+            repo_root = Path(__file__).parent.parent.absolute()
+            self.output_dir = repo_root / 'embeddings_output'
         else:
             self.output_dir = Path(output_dir)
 
@@ -162,6 +163,53 @@ class PersonEmbeddingCollector:
 
         print("PersonEmbeddingCollector initialized - GPU models will load in worker thread")
 
+    def update_embedding_status(self, person_id, person_name, pt_path, status='READY'):
+        """
+        Update the embedding_status table in the database.
+
+        Args:
+            person_id (int): Person ID from face_embeddings table
+            person_name (str): Name of the person
+            pt_path (str): Path to the .pt file directory
+            status (str): Status of the embedding ('PENDING', 'READY', 'CONSUMED')
+
+        Returns:
+            bool: True if update successful, False otherwise
+        """
+        try:
+            current_timestamp = int(time.time() * 1000)  # milliseconds
+
+            conn = self.db_manager.get_connection()
+            if not conn:
+                print(f"[DB] Failed to get database connection for {person_name}")
+                return False
+
+            cur = conn.cursor()
+
+            query = """
+                INSERT INTO embedding_status (person_id, person_name, status, pt_path, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (person_id)
+                DO UPDATE SET
+                    person_name = EXCLUDED.person_name,
+                    status = EXCLUDED.status,
+                    pt_path = EXCLUDED.pt_path,
+                    updated_at = EXCLUDED.updated_at
+            """
+
+            cur.execute(query, (person_id, person_name, status, str(pt_path), current_timestamp, current_timestamp))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            print(f"[DB] Updated embedding_status for {person_name} (person_id={person_id}) with status={status}")
+            return True
+
+        except Exception as e:
+            print(f"[DB] Error updating embedding_status for {person_name}: {e}")
+            return False
+
     def save_person_embeddings_to_pt(self, person_name, embeddings_list, visibility_list, face_id):
         """
         Save all collected embeddings for a person to a single .pt file.
@@ -205,6 +253,15 @@ class PersonEmbeddingCollector:
             print(f"[PT]   - Embeddings shape: {all_embeddings.shape}")
             print(f"[PT]   - Visibility shape: {all_visibility.shape}")
             print(f"[PT]   - PIDs shape: {pids.shape}")
+
+            # Update embedding_status table with READY status
+            self.update_embedding_status(
+                person_id=face_id,
+                person_name=person_name,
+                pt_path=person_dir,
+                status='READY'
+            )
+
             return True
 
         except Exception as e:
@@ -300,6 +357,7 @@ class PersonEmbeddingCollector:
 
                 for face_data in face_results:
                     if face_data.get('embedding') is None:
+                        print(f"[FACE] No embedding extracted for detected face in {job.camera_id}")
                         continue
                     match, sim = self.similarity_search.find_face_match_euclidean(
                         face_data['embedding'], threshold=self.similarity_threshold
@@ -308,6 +366,8 @@ class PersonEmbeddingCollector:
                         self.debug_counters['recognized_faces'] += 1
                         recognized_faces.append((face_data, match))
                         print(f"[FACE] Recognized: {match['name']} (similarity: {sim:.3f})")
+                    else:
+                        print(f"[FACE] Face detected but no match found (best similarity: {sim:.3f}, threshold: {self.similarity_threshold})")
 
                 if recognized_faces:
                     # Start a collection for the first recognized person
@@ -323,7 +383,9 @@ class PersonEmbeddingCollector:
                             self.mode = Mode.COLLECT
                         print(f"[MODE] Switched to COLLECT mode for {person_name}")
                     else:
-                        print(f"[COLLECTION] Skipping collection for {person_name} (already complete or in progress)")
+                        print(f"[COLLECTION] Recognized {person_name} but collection BLOCKED. "
+                              f"PT_exists={self.check_person_embeddings_exist(person_name)} "
+                              f"Active={person_name in self.active_collections}")
 
             else:  # COLLECT
                 if job.kind != 'PERSON':
@@ -363,8 +425,11 @@ class PersonEmbeddingCollector:
 
                     print(f"[CROP] Extracted crop shape: {crop.shape} from {job.camera_id}")
 
+                    # Convert BGR to RGB (GStreamer outputs BGR, but BPBreID expects RGB)
+                    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+
                     t_emb_start = time.time()
-                    emb, visibility = self.person_embedder.extract_embedding(crop)
+                    emb, visibility = self.person_embedder.extract_embedding(crop_rgb)
                     emb_time = (time.time() - t_emb_start) * 1000.0
 
                     if emb is None or visibility is None:
@@ -607,6 +672,16 @@ class PersonEmbeddingCollector:
 
         # Save all collected embeddings to .pt file with face_id as PID
         if all_embeddings_list and all_visibility_list:
+            # Aggregate ONCE
+            all_embeddings = torch.cat(all_embeddings_list, dim=0)
+            all_visibility = torch.cat(all_visibility_list, dim=0)
+
+            # PRIMARY: save to memory
+            self.live_gallery.add_person(
+                pid=face_id,
+                embeddings=all_embeddings,
+                visibility=all_visibility
+            )
             self.save_person_embeddings_to_pt(person_name, all_embeddings_list, all_visibility_list, face_id)
 
         # Remove from active collections

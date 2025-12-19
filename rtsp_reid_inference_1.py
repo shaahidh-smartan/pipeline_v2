@@ -21,10 +21,6 @@ from ultralytics import YOLO
 repo_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(repo_root, 'ByteTrack'))
 
-# Add utils to path for database manager
-sys.path.append(os.path.join(repo_root, 'utils'))
-from utils.database_manager import DatabaseManager
-
 from torchreid.scripts.main import build_config
 from torchreid.tools.feature_extractor import FeatureExtractor
 from torchreid.metrics.distance import compute_distance_matrix_using_bp_features
@@ -101,11 +97,6 @@ class RTSPReIDInference:
         # Initialize ReID components
         self._initialize_reid(config_path, weights_path, gallery_dir, device)
 
-        # Initialize database manager for embedding status monitoring
-        self.db_manager = DatabaseManager()
-        self.last_embedding_check = 0
-        self.embedding_check_interval = 5  # Check every 5 seconds
-
         # Camera ID
         self.camera_id = rtsp_url
         self.frame_count = 0
@@ -169,24 +160,15 @@ class RTSPReIDInference:
         )
         self.device = self.extractor.device
 
-        # Load gallery (optional - can start with empty gallery)
+        # Load gallery
         print("\n[INIT] Loading gallery...")
-        if gallery_dir and Path(gallery_dir).exists():
-            gallery_path = Path(gallery_dir)
-            embeddings_file = gallery_path / 'gallery_embeddings.pt'
+        gallery_path = Path(gallery_dir)
+        self.gallery_embeddings = torch.load(gallery_path / 'embeddings.pt', map_location=self.device)
+        self.gallery_visibility = torch.load(gallery_path / 'visibility.pt', map_location=self.device)
+        self.gallery_pids = torch.load(gallery_path / 'pids.pt', map_location=self.device)
 
-            if embeddings_file.exists():
-                self.gallery_embeddings = torch.load(embeddings_file, map_location=self.device)
-                self.gallery_visibility = torch.load(gallery_path / 'gallery_visibility.pt', map_location=self.device)
-                self.gallery_pids = torch.load(gallery_path / 'gallery_pids.pt', map_location=self.device)
-                print(f"        Gallery: {self.gallery_embeddings.shape[0]} samples, "
-                      f"{self.gallery_embeddings.shape[1]} parts, PIDs: {torch.unique(self.gallery_pids).tolist()}")
-            else:
-                print("        No initial gallery found, starting with empty gallery")
-                self._initialize_empty_gallery()
-        else:
-            print("        No gallery directory provided, starting with empty gallery")
-            self._initialize_empty_gallery()
+        print(f"        Gallery: {self.gallery_embeddings.shape[0]} samples, "
+              f"{self.gallery_embeddings.shape[1]} parts, PIDs: {torch.unique(self.gallery_pids).tolist()}")
 
         # Load YOLO detector
         print("\n[INIT] Loading YOLO detector...")
@@ -198,15 +180,6 @@ class RTSPReIDInference:
         # Voting-based cache structures
         self.track_voting = {}
         self.cached_tracks = {}
-
-    def _initialize_empty_gallery(self):
-        """Initialize empty gallery tensors."""
-        # Create empty tensors with proper shape: [0, num_parts, embedding_dim]
-        # Assuming 6 body parts and 512-dim embeddings (BPBreID default)
-        self.gallery_embeddings = torch.empty(0, 6, 512, device=self.device)
-        self.gallery_visibility = torch.empty(0, 6, device=self.device)
-        self.gallery_pids = torch.empty(0, dtype=torch.long, device=self.device)
-        print("        Initialized empty gallery - will load embeddings dynamically from database")
 
     def _initialize_tracker(self):
         """Initialize ByteTracker with current stream FPS."""
@@ -223,149 +196,6 @@ class RTSPReIDInference:
         # Reset tracking data
         self.track_voting = {}
         self.cached_tracks = {}
-
-    def check_for_new_embeddings(self):
-        """Check embedding_status table for new READY embeddings."""
-        try:
-            conn = self.db_manager.get_connection()
-            if not conn:
-                return []
-
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT person_id, person_name, pt_path, created_at
-                FROM embedding_status
-                WHERE status = 'READY'
-                ORDER BY created_at ASC
-            """)
-
-            results = cur.fetchall()
-            cur.close()
-            conn.close()
-
-            new_embeddings = []
-            for row in results:
-                new_embeddings.append({
-                    'person_id': row[0],
-                    'person_name': row[1],
-                    'pt_path': row[2],
-                    'created_at': row[3]
-                })
-
-            return new_embeddings
-
-        except Exception as e:
-            print(f"[DB_ERROR] Failed to check for new embeddings: {e}")
-            return []
-
-    def load_person_embeddings(self, pt_path):
-        """Load person embeddings from .pt files."""
-        try:
-            pt_dir = Path(pt_path)
-            embeddings_file = pt_dir / 'embeddings.pt'
-            visibility_file = pt_dir / 'visibility.pt'
-            pids_file = pt_dir / 'pids.pt'
-
-            if not (embeddings_file.exists() and visibility_file.exists() and pids_file.exists()):
-                print(f"[LOAD_ERROR] Missing .pt files in {pt_dir}")
-                return None, None, None
-
-            embeddings = torch.load(embeddings_file, map_location=self.device)
-            visibility = torch.load(visibility_file, map_location=self.device)
-            pids = torch.load(pids_file, map_location=self.device)
-
-            print(f"[LOAD] Loaded embeddings from {pt_dir}")
-            print(f"       Shape: {embeddings.shape}, PIDs: {torch.unique(pids).tolist()}")
-
-            return embeddings, visibility, pids
-
-        except Exception as e:
-            print(f"[LOAD_ERROR] Failed to load embeddings from {pt_path}: {e}")
-            return None, None, None
-
-    def update_embedding_status(self, person_id, status='CONSUMED'):
-        """Update embedding status in database."""
-        try:
-            current_timestamp = int(time.time() * 1000)  # milliseconds
-
-            conn = self.db_manager.get_connection()
-            if not conn:
-                return False
-
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE embedding_status
-                SET status = %s, updated_at = %s
-                WHERE person_id = %s
-            """, (status, current_timestamp, person_id))
-
-            conn.commit()
-            cur.close()
-            conn.close()
-
-            print(f"[DB] Updated person_id={person_id} to status={status}")
-            return True
-
-        except Exception as e:
-            print(f"[DB_ERROR] Failed to update embedding status: {e}")
-            return False
-
-    def add_to_gallery(self, embeddings, visibility, pids):
-        """Add new embeddings to the gallery dynamically."""
-        try:
-            # Append to existing gallery
-            self.gallery_embeddings = torch.cat([self.gallery_embeddings, embeddings], dim=0)
-            self.gallery_visibility = torch.cat([self.gallery_visibility, visibility], dim=0)
-            self.gallery_pids = torch.cat([self.gallery_pids, pids], dim=0)
-
-            print(f"[GALLERY] Added {embeddings.shape[0]} new samples")
-            print(f"          Total gallery size: {self.gallery_embeddings.shape[0]} samples")
-            print(f"          Total unique PIDs: {len(torch.unique(self.gallery_pids))}")
-
-            return True
-
-        except Exception as e:
-            print(f"[GALLERY_ERROR] Failed to add embeddings to gallery: {e}")
-            return False
-
-    def poll_and_load_new_embeddings(self):
-        """Poll database for new embeddings and load them into gallery."""
-        current_time = time.time()
-
-        # Only check at intervals
-        if current_time - self.last_embedding_check < self.embedding_check_interval:
-            return
-
-        self.last_embedding_check = current_time
-
-        # Check for new embeddings
-        new_embeddings = self.check_for_new_embeddings()
-
-        if not new_embeddings:
-            return
-
-        print(f"\n[POLL] Found {len(new_embeddings)} new embedding(s) with READY status")
-
-        # Load and add each new embedding
-        for emb_info in new_embeddings:
-            person_id = emb_info['person_id']
-            person_name = emb_info['person_name']
-            pt_path = emb_info['pt_path']
-
-            print(f"[POLL] Loading embeddings for {person_name} (person_id={person_id})...")
-
-            embeddings, visibility, pids = self.load_person_embeddings(pt_path)
-
-            if embeddings is not None:
-                # Add to gallery
-                if self.add_to_gallery(embeddings, visibility, pids):
-                    # Mark as consumed
-                    self.update_embedding_status(person_id, status='CONSUMED')
-                    print(f"[POLL] ✓ Successfully loaded and marked {person_name} as CONSUMED\n")
-                else:
-                    print(f"[POLL] ✗ Failed to add {person_name} to gallery\n")
-            else:
-                print(f"[POLL] ✗ Failed to load embeddings for {person_name}\n")
 
     def extract_test_embeddings(self, model_output):
         """Extract embeddings from BPBreID model output."""
@@ -455,80 +285,73 @@ class RTSPReIDInference:
                 embeddings = embeddings.to(self.device)
                 visibility = visibility.to(self.device)
 
-                # Check if gallery is empty
-                if self.gallery_embeddings.shape[0] == 0:
-                    # No gallery available yet - mark as unknown
-                    person_name = "UNKNOWN"
-                    result_distance = 999.0  # High distance
-                    is_cached = False
-                else:
-                    # Compute distances
-                    with torch.no_grad():
-                        distmat, _ = compute_distance_matrix_using_bp_features(
-                            embeddings,
-                            self.gallery_embeddings,
-                            visibility,
-                            self.gallery_visibility,
-                            dist_combine_strat=self.cfg.test.part_based.dist_combine_strat,
-                            batch_size_pairwise_dist_matrix=self.cfg.test.batch_size_pairwise_dist_matrix,
-                            use_gpu=self.cfg.use_gpu,
-                            metric='euclidean'
-                        )
+                # Compute distances
+                with torch.no_grad():
+                    distmat, _ = compute_distance_matrix_using_bp_features(
+                        embeddings,
+                        self.gallery_embeddings,
+                        visibility,
+                        self.gallery_visibility,
+                        dist_combine_strat=self.cfg.test.part_based.dist_combine_strat,
+                        batch_size_pairwise_dist_matrix=self.cfg.test.batch_size_pairwise_dist_matrix,
+                        use_gpu=self.cfg.use_gpu,
+                        metric='euclidean'
+                    )
 
-                    # Get top-k matches
-                    distances = distmat[0].cpu().numpy()
-                    top_k_indices = np.argsort(distances)[:self.top_k]
-                    top_k_matches = [(int(self.gallery_pids[idx].item()), distances[idx])
-                                    for idx in top_k_indices]
+                # Get top-k matches
+                distances = distmat[0].cpu().numpy()
+                top_k_indices = np.argsort(distances)[:self.top_k]
+                top_k_matches = [(int(self.gallery_pids[idx].item()), distances[idx])
+                                for idx in top_k_indices]
 
-                    # Use best match for tracking/caching
-                    best_pid, best_dist = top_k_matches[0]
-                    person_name = str(best_pid)
-                    result_distance = best_dist
-                    is_cached = False
+                # Use best match for tracking/caching
+                best_pid, best_dist = top_k_matches[0]
+                person_name = str(best_pid)
+                result_distance = best_dist
+                is_cached = False
 
-                    # Voting logic (only when gallery is not empty)
-                    if track_id not in self.track_voting:
-                        self.track_voting[track_id] = {
-                            'votes': {},
-                            'frame_count': 0,
-                            'distances': {}
-                        }
+                # Voting logic
+                if track_id not in self.track_voting:
+                    self.track_voting[track_id] = {
+                        'votes': {},
+                        'frame_count': 0,
+                        'distances': {}
+                    }
 
-                    voting_entry = self.track_voting[track_id]
-                    voting_entry['frame_count'] += 1
+                voting_entry = self.track_voting[track_id]
+                voting_entry['frame_count'] += 1
 
-                    # Count vote if distance < voting_threshold
-                    if best_dist < self.voting_threshold:
-                        if person_name not in voting_entry['votes']:
-                            voting_entry['votes'][person_name] = 0
-                            voting_entry['distances'][person_name] = best_dist
-                        voting_entry['votes'][person_name] += 1
-                        voting_entry['distances'][person_name] = min(
-                            voting_entry['distances'][person_name],
-                            best_dist
-                        )
+                # Count vote if distance < voting_threshold
+                if best_dist < self.voting_threshold:
+                    if person_name not in voting_entry['votes']:
+                        voting_entry['votes'][person_name] = 0
+                        voting_entry['distances'][person_name] = best_dist
+                    voting_entry['votes'][person_name] += 1
+                    voting_entry['distances'][person_name] = min(
+                        voting_entry['distances'][person_name],
+                        best_dist
+                    )
 
-                    # Check if we've collected enough frames
-                    if voting_entry['frame_count'] >= self.voting_window:
-                        if voting_entry['votes']:
-                            max_votes_id = max(voting_entry['votes'], key=voting_entry['votes'].get)
-                            max_votes = voting_entry['votes'][max_votes_id]
+                # Check if we've collected enough frames
+                if voting_entry['frame_count'] >= self.voting_window:
+                    if voting_entry['votes']:
+                        max_votes_id = max(voting_entry['votes'], key=voting_entry['votes'].get)
+                        max_votes = voting_entry['votes'][max_votes_id]
 
-                            if max_votes >= self.min_votes:
-                                self.cached_tracks[track_id] = {
-                                    'person_id': max_votes_id,
-                                    'distance': voting_entry['distances'][max_votes_id],
-                                    'votes': max_votes
-                                }
-                                print(f"[CACHE] T{track_id} -> ID{max_votes_id} "
-                                      f"(votes={max_votes}/{self.voting_window})")
+                        if max_votes >= self.min_votes:
+                            self.cached_tracks[track_id] = {
+                                'person_id': max_votes_id,
+                                'distance': voting_entry['distances'][max_votes_id],
+                                'votes': max_votes
+                            }
+                            print(f"[CACHE] T{track_id} -> ID{max_votes_id} "
+                                  f"(votes={max_votes}/{self.voting_window})")
 
-                                person_name = max_votes_id
-                                result_distance = voting_entry['distances'][max_votes_id]
-                                is_cached = True
+                            person_name = max_votes_id
+                            result_distance = voting_entry['distances'][max_votes_id]
+                            is_cached = True
 
-                        del self.track_voting[track_id]
+                    del self.track_voting[track_id]
 
             # Build result
             result = {
@@ -657,9 +480,6 @@ class RTSPReIDInference:
 
                 self.frame_count += 1
 
-                # Poll for new embeddings periodically
-                self.poll_and_load_new_embeddings()
-
                 # Skip frames if needed
                 if self.frame_skip > 0 and (self.frame_count % (self.frame_skip + 1) != 0):
                     continue
@@ -730,7 +550,7 @@ def main():
     parser = argparse.ArgumentParser(description='RTSP BPBreID ReID Inference')
     parser.add_argument('--config', type=str, required=True, help='BPBreID YAML config')
     parser.add_argument('--weights', type=str, default=None, help='Model weights path')
-    parser.add_argument('--gallery-dir', type=str, default=None, help='Gallery directory (optional - will start empty and load from DB)')
+    parser.add_argument('--gallery-dir', type=str, required=True, help='Gallery directory')
     parser.add_argument('--rtsp-url', type=str, required=True, help='RTSP stream URL')
     parser.add_argument('--output', type=str, default=None, help='Output video path (optional)')
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'])

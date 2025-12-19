@@ -17,8 +17,8 @@ class FacePipeline:
     """complete face detection, alignment, and embedding pipeline."""
     
     def __init__(self,
-                 detection_model='/home/shaahidh/bpbreid/models/scrfd_10g_bnkps.onnx',
-                 embedding_model='/home/shaahidh/bpbreid/models/mbf.onnx',
+                 detection_model='models/scrfd_10g_bnkps.onnx',
+                 embedding_model='models/mbf.onnx',
                  gpu_id=0):
         """Initialize face pipeline components with thread safety."""
         self.gpu_id = gpu_id

@@ -23,7 +23,7 @@ os.environ['NO_PROXY'] = '*'
 # Add parent directory to path to access utils and core modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from BpB_embedding_collector_pt import PersonEmbeddingCollector
+from person_embedding_collector import PersonEmbeddingCollector
 
 
 def create_camera_config():
@@ -38,14 +38,26 @@ def create_camera_config():
     """
     return [
         {
+            'name': 'Left Camera',
+            'url': 'rtsp://admin:admin%40123@192.168.0.120:554/stream1',
+            'width': 640,
+            'height': 640
+        },
+        {
             'name': 'Right Camera',
-            'url': 'rtsp://admin:admin%40123@192.168.0.124:554/stream1',
+            'url': 'rtsp://admin:admin%40123@192.168.0.110:554/stream1',
             'width': 640,
             'height': 640
         },
         {
             'name': 'Center Camera',
-            'url': 'rtsp://admin:admin%40123@192.168.0.110:554/stream1',
+            'url': 'rtsp://admin:admin%40123@192.168.0.216:554/stream1',
+            'width': 640,
+            'height': 640
+        },
+        {
+            'name': 'Back Camera',
+            'url': 'rtsp://admin:admin%40123@192.168.0.101:554/stream1',
             'width': 640,
             'height': 640
         }

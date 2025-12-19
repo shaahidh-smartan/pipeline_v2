@@ -41,8 +41,7 @@ class PersonEmbeddingCollector:
     """
     Person Embedding Collector Service for multi-camera person re-identification.
 
-    Collects BPBreID person embeddings from 4 cameras using face recognition triggers.
-    Uses BPBreID (Body Part-Based Re-Identification) for high-quality person embeddings.
+    Collects person embeddings from 4 cameras using face recognition triggers.
     """
     
     def __init__(self, stream_configs, similarity_threshold=0.6, target_embeddings_per_person=25):
@@ -57,8 +56,8 @@ class PersonEmbeddingCollector:
         Returns:
             None
         """
-        if len(stream_configs) != 2:
-            raise ValueError("This system is designed for exactly 2 cameras (center and right)")
+        if len(stream_configs) != 4:
+            raise ValueError("This system is designed for exactly 4 cameras")
             
         self.stream_configs = stream_configs
         self.similarity_threshold = similarity_threshold
@@ -80,19 +79,21 @@ class PersonEmbeddingCollector:
         # Initialize GStreamer
         Gst.init(None)
         
-        # Display configuration (side-by-side for 2 cameras)
+        # Display configuration
         self.camera_width = 640
         self.camera_height = 480
-        self.display_width = 2 * self.camera_width  # 2 cameras side by side
-        self.display_height = self.camera_height
+        self.display_width = 2 * self.camera_width
+        self.display_height = 2 * self.camera_height
 
         # Processing configuration - Frame-based collection
         self.detection_interval = 3  # Process every 3rd frame for detection
         
-        # Initialize cameras (only center and right)
+        # Initialize cameras
         self.cameras = {
-            'center': create_camera_structure(stream_configs[0]),
-            'right': create_camera_structure(stream_configs[1])
+            'left': create_camera_structure(stream_configs[0]),
+            'right': create_camera_structure(stream_configs[1]),
+            'center': create_camera_structure(stream_configs[2]),
+            'back': create_camera_structure(stream_configs[3])
         }
         
         # Control flags
@@ -102,8 +103,10 @@ class PersonEmbeddingCollector:
         # Frame synchronization
         self.display_lock = threading.Lock()
         self.stable_display_buffer = {
-            'center': None,
+            'left': None,
             'right': None,
+            'center': None,
+            'back': None,
             'timestamp': time.time()
         }
         
@@ -138,9 +141,9 @@ class PersonEmbeddingCollector:
         }
         
         # Performance tracking
-        self.fps_counters = {'center': 0, 'right': 0}
-        self.fps_start_times = {'center': time.time(), 'right': time.time()}
-        self.current_fps = {'center': 0, 'right': 0}
+        self.fps_counters = {'left': 0, 'right': 0, 'center': 0, 'back': 0}
+        self.fps_start_times = {'left': time.time(), 'right': time.time(), 'center': time.time(), 'back': time.time()}
+        self.current_fps = {'left': 0, 'right': 0, 'center': 0, 'back': 0}
         
         # Initialize pipelines
         self.initialize_cameras()
@@ -163,14 +166,14 @@ class PersonEmbeddingCollector:
         self.person_detector = PersonDetector()
         self.person_embedder = PersonEmbedder()
 
-        # Warmup
+        # Warmup 
         try:
             dummy_frame = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
             dummy_crop  = np.random.randint(0, 255, (256, 128, 3), dtype=np.uint8)
             _ = self.face_pipeline.process_frame(dummy_frame, thresh=0.5, input_size=(640, 640))
             _ = self.person_detector.detect_persons(dummy_frame)
-            _, _ = self.person_embedder.extract_embedding(dummy_crop)  # Now returns (embedding, visibility)
-            if torch.cuda.is_available():
+            _ = self.person_embedder.extract_embedding(dummy_crop)
+            if torch.cuda.is_available(): 
                 torch.cuda.synchronize()
         except Exception as e:
             print(f"[GPU] Warmup note: {e}")
@@ -210,8 +213,7 @@ class PersonEmbeddingCollector:
                 # Recognize & start collection
                 recognized_faces = []
                 self.debug_counters['face_detections'] += len(face_results)
-                print(f"[FACE] Detected {len(face_results)} faces in {job.camera_id} camera")
-
+                
                 for face_data in face_results:
                     if face_data.get('embedding') is None:
                         continue
@@ -221,23 +223,16 @@ class PersonEmbeddingCollector:
                     if match:
                         self.debug_counters['recognized_faces'] += 1
                         recognized_faces.append((face_data, match))
-                        print(f"[FACE] Recognized: {match['name']} (similarity: {sim:.3f})")
 
                 if recognized_faces:
                     # Start a collection for the first recognized person
                     _, match = recognized_faces[0]
                     person_name = match['name']
-                    face_id = match['id']  # Get face_id from the match result
-                    print(f"[COLLECTION] Checking if should start collection for {person_name} (face_id={face_id})")
                     if self.should_start_frame_collection(person_name):
-                        print(f"[COLLECTION] Starting collection for {person_name}")
-                        self.start_frame_collection(person_name, face_id, job.camera_id)
+                        self.start_frame_collection(person_name, job.camera_id)
                         # Switch mode to COLLECT
                         with self.mode_lock:
                             self.mode = Mode.COLLECT
-                        print(f"[MODE] Switched to COLLECT mode for {person_name}")
-                    else:
-                        print(f"[COLLECTION] Skipping collection for {person_name} (already complete or in progress)")
 
             else:  # COLLECT
                 if job.kind != 'PERSON':
@@ -250,11 +245,7 @@ class PersonEmbeddingCollector:
                 self._stats['person_qwait_ms'].append(q_wait_ms)
                 self._stats['person_infer_ms'].append(infer_ms)
 
-                print(f"[PERSON] Detected {len(person_dets)} persons in {job.camera_id} camera")
-
                 if not person_dets or not self.active_collections:
-                    if not person_dets:
-                        print(f"[PERSON] No person detections in {job.camera_id}")
                     continue
 
                 # For each active collection, try to collect from this camera
@@ -268,35 +259,16 @@ class PersonEmbeddingCollector:
 
                     # Pick best detection and embed inline
                     best = max(person_dets, key=lambda p: p['confidence'])
-                    print(f"[PERSON] Best detection confidence: {best['confidence']:.3f} bbox: {best['bbox']}")
-
                     crop = self.person_detector.get_person_crop(job.frame, best['bbox'], padding=10)
-                    if crop is None:
-                        print(f"[CROP] Failed to extract person crop from {job.camera_id}")
+                    if crop is None: 
                         continue
 
-                    print(f"[CROP] Extracted crop shape: {crop.shape} from {job.camera_id}")
-
-                    t_emb_start = time.time()
-                    emb, visibility = self.person_embedder.extract_embedding(crop)
-                    emb_time = (time.time() - t_emb_start) * 1000.0
-
-                    if emb is None or visibility is None:
-                        print(f"[EMBEDDING] Failed to extract embedding for {person_name} from {job.camera_id}")
+                    emb = self.person_embedder.extract_embedding(crop)
+                    if emb is None:
                         continue
 
-                    print(f"[EMBEDDING] Extracted embedding shape: {emb.shape}, visibility shape: {visibility.shape}, took {emb_time:.1f}ms for {person_name} from {job.camera_id}")
-
-                    # Get face_id for this person from the active collection data
-                    with self.frame_collection_lock:
-                        if person_name not in self.active_collections:
-                            continue
-                        face_id = self.active_collections[person_name]['face_id']
-
-                    # Save to DB using BPBreID embedding table
-                    print(f"[DB] Attempting to save BPBreID embedding for {person_name} (face_id={face_id}) from {job.camera_id}")
-                    if self.db_manager.insert_bpbreid_embedding(face_id, emb, visibility, job.camera_id):
-                        print(f"[DB] Successfully saved embedding for {person_name} from {job.camera_id}")
+                    # Save to DB + update counters
+                    if self.db_manager.insert_person_embedding(person_name, emb, job.camera_id):
                         with self.frame_collection_lock:
                             if person_name in self.active_collections:  # Double-check still active
                                 cdata = self.active_collections[person_name]
@@ -314,13 +286,13 @@ class PersonEmbeddingCollector:
                                 if done:
                                     self.complete_frame_collection(person_name)
                         
-                        # Update UI to show person bounding box being used for BPBreID embedding
+                        # Update UI to show person bounding box being used for VGG embedding
                         camera_data = self.cameras[job.camera_id]
                         camera_data['persistent_detections'] = [{
                             'bbox': best['bbox'],
                             'match': {'name': person_name},
                             'confidence': best['confidence'],
-                            'type': 'person_bpbreid'  # Mark as person detection for BPBreID
+                            'type': 'person_vgg'  # Mark as person detection for VGG
                         }]
                         camera_data['detection_timestamp'] = time.time()
                         
@@ -342,7 +314,7 @@ class PersonEmbeddingCollector:
         Returns:
             None
         """
-        for camera_id in ['center', 'right']:
+        for camera_id in ['left', 'right', 'center', 'back']:
             config = self.cameras[camera_id]['config']
             print(f"Initializing {camera_id} camera: {config.get('name', config['url'])}")
             
@@ -461,9 +433,9 @@ class PersonEmbeddingCollector:
         """
         # Get current count from database
         db_count = self.db_manager.get_person_embedding_count(person_name)
-
+        
         # Check if person already has complete collection
-        if db_count >= self.target_embeddings_per_person * 2:  # 25 per camera × 2 cameras = 50
+        if db_count >= self.target_embeddings_per_person * 4:  # 25 per camera × 4 cameras
             return False
         
         # Check if already collecting for this person on ANY camera
@@ -472,13 +444,12 @@ class PersonEmbeddingCollector:
         
         return True
     
-    def start_frame_collection(self, person_name, face_id, trigger_camera_id):
+    def start_frame_collection(self, person_name, trigger_camera_id):
         """
         Initialize per-camera counters for a new collection.
 
         Args:
             person_name (str): Name of the person
-            face_id (int): Face ID from face_embeddings table
             trigger_camera_id (str): Camera that triggered the collection
 
         Returns:
@@ -487,16 +458,17 @@ class PersonEmbeddingCollector:
         with self.frame_collection_lock:
             if person_name not in self.active_collections:
                 self.active_collections[person_name] = {
-                    'face_id': face_id,  # Store face_id for BPBreID embedding insertion
                     'trigger_camera': trigger_camera_id,
                     'start_time': time.time(),
                     'cameras': {
+                        'left': {'frames_collected': 0, 'embeddings': [], 'last_person_box': None},
+                        'right': {'frames_collected': 0, 'embeddings': [], 'last_person_box': None},
                         'center': {'frames_collected': 0, 'embeddings': [], 'last_person_box': None},
-                        'right': {'frames_collected': 0, 'embeddings': [], 'last_person_box': None}
+                        'back': {'frames_collected': 0, 'embeddings': [], 'last_person_box': None}
                     },
                     'total_frames_collected': 0
                 }
-                print(f"Started frame collection for {person_name} (face_id={face_id}) on ALL cameras (triggered by {trigger_camera_id})")
+                print(f"Started frame collection for {person_name} on ALL cameras (triggered by {trigger_camera_id})")
                 return True
         return False
 
@@ -669,10 +641,10 @@ class PersonEmbeddingCollector:
             if match:
                 person_name = match['name']
                 
-                if detection_type == 'person_bpbreid':
-                    # Person bounding box for BPBreID embedding collection
-                    embedding_status = f"BPBREID EMBEDDING"
-                    color = (255, 165, 0)  # Orange for BPBreID person detection
+                if detection_type == 'person_vgg':
+                    # Person bounding box for VGG embedding collection
+                    embedding_status = f"VGG EMBEDDING"
+                    color = (255, 165, 0)  # Orange for VGG person detection
                     thickness = 4  # Thicker for visibility
                     label = f"{person_name} {embedding_status}"
                 else:
@@ -766,7 +738,7 @@ class PersonEmbeddingCollector:
         with self.display_lock:
             updated = False
             
-            for camera_id in ['center', 'right']:
+            for camera_id in ['left', 'right', 'center', 'back']:
                 camera_data = self.cameras[camera_id]
                 
                 with camera_data['frame_lock']:
@@ -780,34 +752,52 @@ class PersonEmbeddingCollector:
     
     def create_stable_dual_display(self):
         """
-        Create a side-by-side display for 2 cameras (center and right).
+        Create a 2x2 grid display for 4 cameras.
 
         Args:
             None
 
         Returns:
-            np.ndarray: Canvas with 2 cameras side by side
+            np.ndarray: Canvas with 2x2 camera grid
         """
         canvas = np.zeros((self.display_height, self.display_width, 3), dtype=np.uint8)
 
         with self.display_lock:
-            # Left side - Center camera
-            if self.stable_display_buffer['center'] is not None:
-                canvas[0:self.camera_height, 0:self.camera_width] = self.stable_display_buffer['center']
+            # (0,0) Top-left
+            if self.stable_display_buffer['left'] is not None:
+                canvas[0:self.camera_height, 0:self.camera_width] = self.stable_display_buffer['left']
             else:
                 placeholder = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
-                cv2.putText(placeholder, "Connecting Center Camera...", (50, self.camera_height // 2),
+                cv2.putText(placeholder, "Connecting Left Camera...", (50, self.camera_height // 2), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
                 canvas[0:self.camera_height, 0:self.camera_width] = placeholder
 
-            # Right side - Right camera
+            # (0,1) Top-right
             if self.stable_display_buffer['right'] is not None:
                 canvas[0:self.camera_height, self.camera_width:self.display_width] = self.stable_display_buffer['right']
             else:
                 placeholder = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
-                cv2.putText(placeholder, "Connecting Right Camera...", (50, self.camera_height // 2),
+                cv2.putText(placeholder, "Connecting Right Camera...", (50, self.camera_height // 2), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
                 canvas[0:self.camera_height, self.camera_width:self.display_width] = placeholder
+
+            # (1,0) Bottom-left
+            if self.stable_display_buffer['center'] is not None:
+                canvas[self.camera_height:self.display_height, 0:self.camera_width] = self.stable_display_buffer['center']
+            else:
+                placeholder = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
+                cv2.putText(placeholder, "Connecting Center Camera...", (50, self.camera_height // 2), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+                canvas[self.camera_height:self.display_height, 0:self.camera_width] = placeholder
+
+            # (1,1) Bottom-right
+            if self.stable_display_buffer['back'] is not None:
+                canvas[self.camera_height:self.display_height, self.camera_width:self.display_width] = self.stable_display_buffer['back']
+            else:
+                placeholder = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
+                cv2.putText(placeholder, "Connecting Back Camera...", (50, self.camera_height // 2), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+                canvas[self.camera_height:self.display_height, self.camera_width:self.display_width] = placeholder
 
         self.draw_global_status(canvas)
         return canvas
@@ -826,7 +816,7 @@ class PersonEmbeddingCollector:
         line_height = 35
         
         # Draw person embedding collection summary
-        cv2.putText(canvas, "BPBreID Person Embedding Collection (DATABASE):",
+        cv2.putText(canvas, "GPU-Safe Person Embedding Collection (DATABASE):", 
                 (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         y_pos += line_height
         
@@ -842,16 +832,17 @@ class PersonEmbeddingCollector:
             y_pos += line_height - 10
             
             for person_name, collection_data in active_collections_copy.items():
-                center_frames = collection_data['cameras']['center']['frames_collected']
+                left_frames = collection_data['cameras']['left']['frames_collected']
                 right_frames = collection_data['cameras']['right']['frames_collected']
+                center_frames = collection_data['cameras']['center']['frames_collected']
+                back_frames = collection_data['cameras']['back']['frames_collected']
                 elapsed = time.time() - collection_data['start_time']
-
+                
                 # Get current DB count
                 db_count = self.db_manager.get_person_embedding_count(person_name)
-
-                # Target is 25 per camera * 2 cameras = 50
-                active_text = f"  {person_name}: {db_count}/50 in DB [C:{center_frames}, R:{right_frames}] ({elapsed:.1f}s)"
-                cv2.putText(canvas, active_text, (10, y_pos),
+                
+                active_text = f"  {person_name}: {db_count}/100 in DB [L:{left_frames},R:{right_frames},C:{center_frames},B:{back_frames}] ({elapsed:.1f}s)"
+                cv2.putText(canvas, active_text, (10, y_pos), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                 y_pos += line_height - 10
         
@@ -873,7 +864,7 @@ class PersonEmbeddingCollector:
             None
         """
         # Start pipelines sequentially (GStreamer best practice)
-        for camera_id in ['center', 'right']:
+        for camera_id in ['left', 'right', 'center', 'back']:
             try:
                 print(f"[DEBUG] About to start {camera_id} pipeline...")
                 pipeline = self.cameras[camera_id]['pipeline']
@@ -898,7 +889,7 @@ class PersonEmbeddingCollector:
         self.gpu_worker_thread.start()
         
         # Start processing threads
-        for camera_id in ['center', 'right']:
+        for camera_id in ['left', 'right', 'center', 'back']:
             thread = threading.Thread(target=self.processing_thread, args=(camera_id,))
             thread.daemon = True
             thread.start()
@@ -948,7 +939,7 @@ class PersonEmbeddingCollector:
                     self.complete_frame_collection(person_name)
         
         # Stop camera pipelines
-        for camera_id in ['center', 'right']:
+        for camera_id in ['left', 'right', 'center', 'back']:
             try:
                 pipeline = self.cameras[camera_id]['pipeline']
                 if pipeline:

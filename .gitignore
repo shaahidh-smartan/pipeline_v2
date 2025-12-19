@@ -182,4 +182,4 @@ gallery_venv
 detectron2
 bpbreid_human_parsing_labels
 models
-detectron2
+detectron2embeddings_output/
