@@ -10,7 +10,8 @@ import time
 from queue import Queue
 from collections import namedtuple
 import traceback
-from datetime import datetime 
+from datetime import datetime
+from pathlib import Path
 
 # ByteTracker imports
 from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
@@ -20,9 +21,26 @@ from camera import CameraManager, create_camera_configs_from_ips
 
 # Import our utility modules
 from utils.database_manager import DatabaseManager
-from utils.person_embedder import PersonEmbedder
 from utils.person_detector import PersonDetector
-from utils.similarity_search import SimilaritySearch
+
+# BPBreID imports
+from torchreid.scripts.main import build_config
+from torchreid.tools.feature_extractor import FeatureExtractor
+from torchreid.metrics.distance import compute_distance_matrix_using_bp_features
+from torchreid.utils.constants import bn_correspondants
+
+
+class SimpleArgs:
+    """Minimal args for build_config."""
+    def __init__(self):
+        self.root = ''
+        self.save_dir = 'log'
+        self.job_id = 'inference'
+        self.inference_enabled = False
+        self.sources = None
+        self.targets = None
+        self.transforms = None
+        self.opts = []
 
 
 class PersonReIDService:
@@ -36,13 +54,22 @@ class PersonReIDService:
     4. Provides real-time person tracking and identification
     """
     
-    def __init__(self, stream_configs, similarity_threshold=0.8):
+    def __init__(self, stream_configs, config_path, weights_path, gallery_dir=None,
+                 voting_threshold=4.5, voting_window=30, min_votes=15,
+                 matching_threshold=6.0, device='cuda'):
         """
-        Initialize Dynamic Camera Person ReID Service.
+        Initialize Dynamic Camera Person ReID Service with BPBreID.
 
         Args:
             stream_configs (list): List of camera stream configurations
-            similarity_threshold (float): Threshold for person similarity matching (default: 0.8)
+            config_path (str): Path to BPBreID config YAML
+            weights_path (str): Path to BPBreID model weights
+            gallery_dir (str): Directory with gallery embeddings (optional)
+            voting_threshold (float): Distance threshold for counting a vote (default 4.5)
+            voting_window (int): Number of frames to collect votes (default 30)
+            min_votes (int): Minimum votes needed to cache an ID (default 15)
+            matching_threshold (float): Distance threshold for matching/display (default 6.0)
+            device (str): 'cuda' or 'cpu'
 
         Raises:
             ValueError: If no cameras are provided
@@ -50,10 +77,14 @@ class PersonReIDService:
         self.num_cameras = len(stream_configs)
         if self.num_cameras == 0:
             raise ValueError("At least one camera is required")
-            
+
         self.stream_configs = stream_configs
-        self.similarity_threshold = similarity_threshold
-        self.last_detection_time = {} 
+        self.voting_threshold = voting_threshold
+        self.voting_window = voting_window
+        self.min_votes = min_votes
+        self.matching_threshold = matching_threshold
+        self.device = device
+        self.last_detection_time = {}
         self.reset_delay = 4  # seconds
 
         self.logs_dir = "logs"
@@ -62,32 +93,38 @@ class PersonReIDService:
         # Create log file with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.master_list_log_file = os.path.join(self.logs_dir, f"master_list_{timestamp}.txt")
-        
+
         # Create log file with simple header
         with open(self.master_list_log_file, 'w') as f:
             f.write(f"PERSON RE-ID LOG - Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("="*80 + "\n\n")
-        
+
         print(f"Log file created: {self.master_list_log_file}")
-        self.logged_tracks = set()      
+        self.logged_tracks = set()
+
         # Initialize utility modules
         print("Initializing database manager...")
         self.db_manager = DatabaseManager()
-        
-        print("Initializing person embedder...")
-        self.person_embedder = PersonEmbedder()
-        
+
         print("Initializing person detector...")
         self.person_detector = PersonDetector()
-        
-        print("Initializing similarity search...")
-        self.similarity_search = SimilaritySearch(self.db_manager)
-        
-        # Add caching for tracking ID to person mapping
-        self.track_id_to_person = {}  # {(camera_id, track_id): {'name': str, 'confidence': float, 'timestamp': float}}
-        self.confidence_threshold_for_caching = 0.75  # Cache if confidence >= 0.8
-        self.cache_expiry_time = 30.0  # Cache expires after 30 seconds of no updates
-        
+
+        # Initialize BPBreID model
+        print("\n[INIT] Loading BPBreID model...")
+        self._initialize_reid(config_path, weights_path, gallery_dir, device)
+
+        # Voting-based cache structures (replacing old cache)
+        self.track_voting = {}  # {(camera_id, track_id): {'votes': {}, 'frame_count': 0, 'distances': {}}}
+        self.cached_tracks = {}  # {(camera_id, track_id): {'person_id': str, 'distance': float, 'votes': int}}
+
+        # Database embedding polling
+        self.last_embedding_check = 0
+        self.embedding_check_interval = 5  # Check every 5 seconds
+
+        # Load all existing CONSUMED embeddings on startup
+        print("\n[INIT] Loading existing embeddings from database...")
+        self._load_all_consumed_embeddings()
+
         # Create tracker arguments
         tracker_args = type('Args', (object,), {
             'track_thresh': 0.5,
@@ -158,6 +195,99 @@ class PersonReIDService:
         self.initialize_database_connection()
         self.master_person_list = []
 
+    def _initialize_reid(self, config_path, weights_path, gallery_dir, device):
+        """Initialize BPBreID model and gallery."""
+        # Build config and extractor
+        dummy_args = SimpleArgs()
+        self.cfg = build_config(args=dummy_args, config_file=config_path)
+        self.cfg.use_gpu = (device.startswith('cuda') and torch.cuda.is_available())
+
+        model_path = weights_path or self.cfg.model.load_weights
+        self.extractor = FeatureExtractor(
+            self.cfg,
+            model_path=model_path,
+            device=device if torch.cuda.is_available() else 'cpu',
+            num_classes=1,
+            verbose=True
+        )
+        self.device = self.extractor.device
+
+        # Load gallery (optional - can start with empty gallery)
+        print("\n[INIT] Loading gallery...")
+        if gallery_dir and Path(gallery_dir).exists():
+            gallery_path = Path(gallery_dir)
+            embeddings_file = gallery_path / 'gallery_embeddings.pt'
+
+            if embeddings_file.exists():
+                self.gallery_embeddings = torch.load(embeddings_file, map_location=self.device)
+                self.gallery_visibility = torch.load(gallery_path / 'gallery_visibility.pt', map_location=self.device)
+                self.gallery_pids = torch.load(gallery_path / 'gallery_pids.pt', map_location=self.device)
+                print(f"        Gallery: {self.gallery_embeddings.shape[0]} samples, "
+                      f"{self.gallery_embeddings.shape[1]} parts, PIDs: {torch.unique(self.gallery_pids).tolist()}")
+            else:
+                print("        No initial gallery found, starting with empty gallery")
+                self._initialize_empty_gallery()
+        else:
+            print("        No gallery directory provided, starting with empty gallery")
+            self._initialize_empty_gallery()
+
+    def _initialize_empty_gallery(self):
+        """Initialize empty gallery tensors."""
+        # Create empty tensors with proper shape: [0, num_parts, embedding_dim]
+        # Assuming 6 body parts and 512-dim embeddings (BPBreID default)
+        self.gallery_embeddings = torch.empty(0, 6, 512, device=self.device)
+        self.gallery_visibility = torch.empty(0, 6, device=self.device)
+        self.gallery_pids = torch.empty(0, dtype=torch.long, device=self.device)
+        print("        Initialized empty gallery - will load embeddings dynamically from database")
+
+    def _load_all_consumed_embeddings(self):
+        """Load all CONSUMED embeddings from database on startup."""
+        try:
+            conn = self.db_manager.get_connection()
+            if not conn:
+                print("        No database connection, skipping initial embedding load")
+                return
+
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT person_id, person_name, pt_path, created_at
+                FROM embedding_status
+                WHERE status = 'CONSUMED'
+                ORDER BY created_at ASC
+            """)
+
+            results = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            if not results:
+                print("        No CONSUMED embeddings found in database")
+                return
+
+            print(f"        Found {len(results)} CONSUMED embedding(s) to load")
+
+            # Load each embedding
+            for row in results:
+                person_id = row[0]
+                person_name = row[1]
+                pt_path = row[2]
+
+                print(f"        Loading {person_name} (person_id={person_id})...")
+
+                embeddings, visibility, pids = self.load_person_embeddings(pt_path)
+
+                if embeddings is not None:
+                    self.add_to_gallery(embeddings, visibility, pids)
+                else:
+                    print(f"        ✗ Failed to load embeddings for {person_name}")
+
+            print(f"        ✓ Loaded {len(results)} person embeddings into gallery\n")
+
+        except Exception as e:
+            print(f"[ERROR] Failed to load consumed embeddings: {e}")
+            import traceback
+            traceback.print_exc()
+
     def initialize_database_connection(self):
         """
         Initialize and verify database connection.
@@ -171,17 +301,179 @@ class PersonReIDService:
         print("🔍 Checking database connection...")
         try:
             stats = self.db_manager.get_database_stats()
-            
+
             self.db_stats['total_people'] = stats['person_people']
             self.db_stats['total_embeddings'] = stats['person_embeddings']
             self.db_stats['last_updated'] = time.time()
-            
+
             print(f"Database connection successful!")
-            
+
         except Exception as e:
             print(f"Database initialization failed: {e}")
             raise
-    
+
+    def check_for_new_embeddings(self):
+        """Check embedding_status table for new READY embeddings."""
+        try:
+            conn = self.db_manager.get_connection()
+            if not conn:
+                return []
+
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT person_id, person_name, pt_path, created_at
+                FROM embedding_status
+                WHERE status = 'READY'
+                ORDER BY created_at ASC
+            """)
+
+            results = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            new_embeddings = []
+            for row in results:
+                new_embeddings.append({
+                    'person_id': row[0],
+                    'person_name': row[1],
+                    'pt_path': row[2],
+                    'created_at': row[3]
+                })
+
+            return new_embeddings
+
+        except Exception as e:
+            print(f"[DB_ERROR] Failed to check for new embeddings: {e}")
+            return []
+
+    def load_person_embeddings(self, pt_path):
+        """Load person embeddings from .pt files."""
+        try:
+            pt_dir = Path(pt_path)
+            embeddings_file = pt_dir / 'embeddings.pt'
+            visibility_file = pt_dir / 'visibility.pt'
+            pids_file = pt_dir / 'pids.pt'
+
+            if not (embeddings_file.exists() and visibility_file.exists() and pids_file.exists()):
+                print(f"[LOAD_ERROR] Missing .pt files in {pt_dir}")
+                return None, None, None
+
+            embeddings = torch.load(embeddings_file, map_location=self.device)
+            visibility = torch.load(visibility_file, map_location=self.device)
+            pids = torch.load(pids_file, map_location=self.device)
+
+            print(f"[LOAD] Loaded embeddings from {pt_dir}")
+            print(f"       Shape: {embeddings.shape}, PIDs: {torch.unique(pids).tolist()}")
+
+            return embeddings, visibility, pids
+
+        except Exception as e:
+            print(f"[LOAD_ERROR] Failed to load embeddings from {pt_path}: {e}")
+            return None, None, None
+
+    def update_embedding_status(self, person_id, status='CONSUMED'):
+        """Update embedding status in database."""
+        try:
+            current_timestamp = int(time.time() * 1000)  # milliseconds
+
+            conn = self.db_manager.get_connection()
+            if not conn:
+                return False
+
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE embedding_status
+                SET status = %s, updated_at = %s
+                WHERE person_id = %s
+            """, (status, current_timestamp, person_id))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            print(f"[DB] Updated person_id={person_id} to status={status}")
+            return True
+
+        except Exception as e:
+            print(f"[DB_ERROR] Failed to update embedding status: {e}")
+            return False
+
+    def add_to_gallery(self, embeddings, visibility, pids):
+        """Add new embeddings to the gallery dynamically."""
+        try:
+            # Append to existing gallery
+            self.gallery_embeddings = torch.cat([self.gallery_embeddings, embeddings], dim=0)
+            self.gallery_visibility = torch.cat([self.gallery_visibility, visibility], dim=0)
+            self.gallery_pids = torch.cat([self.gallery_pids, pids], dim=0)
+
+            print(f"[GALLERY] Added {embeddings.shape[0]} new samples")
+            print(f"          Total gallery size: {self.gallery_embeddings.shape[0]} samples")
+            print(f"          Total unique PIDs: {len(torch.unique(self.gallery_pids))}")
+
+            return True
+
+        except Exception as e:
+            print(f"[GALLERY_ERROR] Failed to add embeddings to gallery: {e}")
+            return False
+
+    def poll_and_load_new_embeddings(self):
+        """Poll database for new embeddings and load them into gallery."""
+        current_time = time.time()
+
+        # Only check at intervals
+        if current_time - self.last_embedding_check < self.embedding_check_interval:
+            return
+
+        self.last_embedding_check = current_time
+
+        # Check for new embeddings
+        new_embeddings = self.check_for_new_embeddings()
+
+        if not new_embeddings:
+            return
+
+        print(f"\n[POLL] Found {len(new_embeddings)} new embedding(s) with READY status")
+
+        # Load and add each new embedding
+        for emb_info in new_embeddings:
+            person_id = emb_info['person_id']
+            person_name = emb_info['person_name']
+            pt_path = emb_info['pt_path']
+
+            print(f"[POLL] Loading embeddings for {person_name} (person_id={person_id})...")
+
+            embeddings, visibility, pids = self.load_person_embeddings(pt_path)
+
+            if embeddings is not None:
+                # Add to gallery
+                if self.add_to_gallery(embeddings, visibility, pids):
+                    # Mark as consumed
+                    self.update_embedding_status(person_id, status='CONSUMED')
+                    print(f"[POLL] ✓ Successfully loaded and marked {person_name} as CONSUMED\n")
+                else:
+                    print(f"[POLL] ✗ Failed to add {person_name} to gallery\n")
+            else:
+                print(f"[POLL] ✗ Failed to load embeddings for {person_name}\n")
+
+    def extract_test_embeddings(self, model_output):
+        """Extract embeddings from BPBreID model output."""
+        embeddings_dict, visibility_dict, _, _, _, _ = model_output
+
+        embeddings_list = []
+        visibility_list = []
+
+        for test_emb in self.cfg.model.bpbreid.test_embeddings:
+            embds = embeddings_dict[test_emb]
+            embeddings_list.append(embds if len(embds.shape) == 3 else embds.unsqueeze(1))
+
+            vis_key = test_emb if test_emb not in bn_correspondants else bn_correspondants[test_emb]
+            vis_scores = visibility_dict[vis_key]
+            visibility_list.append(vis_scores if len(vis_scores.shape) == 2 else vis_scores.unsqueeze(1))
+
+        embeddings = torch.cat(embeddings_list, dim=1)
+        visibility = torch.cat(visibility_list, dim=1)
+        return embeddings, visibility
+
     def prepare_detections_for_tracker(self, person_boxes_track):
         """
         Prepare detections in the correct format for BYTETracker.
@@ -223,76 +515,6 @@ class PersonReIDService:
         
         return torch.tensor(detections_list, dtype=torch.float32)
     
-    def get_cached_person(self, camera_id, track_id):
-        """
-        Get cached person identification for a track ID.
-
-        Retrieves cached person identification if available and not expired.
-        Automatically removes expired cache entries.
-
-        Args:
-            camera_id (str): Camera identifier
-            track_id (int): Track identifier
-
-        Returns:
-            dict or None: Cached person data with name, confidence, and timestamp, or None if not cached/expired
-        """
-        cache_key = (camera_id, track_id)
-        
-        if cache_key in self.track_id_to_person:
-            cached_entry = self.track_id_to_person[cache_key]
-            current_time = time.time()
-            
-            # Check if cache entry hasn't expired
-            if current_time - cached_entry['timestamp'] <= self.cache_expiry_time:
-                return cached_entry
-            else:
-                # Cache expired, remove it
-                print(f"[CACHE EXPIRED] Removing expired entry for track ID {track_id}")
-                del self.track_id_to_person[cache_key]
-        
-        return None
-
-    def cache_person_identification(self, camera_id, track_id, person_name, confidence):
-        """
-        Cache person identification if confidence is high enough.
-
-        Stores person identification in cache for fast retrieval if confidence
-        meets the minimum threshold for caching.
-
-        Args:
-            camera_id (str): Camera identifier
-            track_id (int): Track identifier
-            person_name (str): Identified person name
-            confidence (float): Confidence score of the identification
-
-        Returns:
-            bool: True if cached, False if confidence too low
-        """
-        if confidence >= self.confidence_threshold_for_caching:
-            cache_key = (camera_id, track_id)
-            self.track_id_to_person[cache_key] = {
-                'name': person_name,
-                'confidence': confidence,
-                'timestamp': time.time()
-            }
-            print(f"[CACHE STORED] Track ID {track_id} -> {person_name} (confidence: {confidence:.3f})")
-            return True
-        return False
-
-    def update_cache_timestamp(self, camera_id, track_id):
-        """
-        Update timestamp for cached entry to keep it alive.
-
-        Extends the lifetime of a cached entry by updating its timestamp.
-
-        Args:
-            camera_id (str): Camera identifier
-            track_id (int): Track identifier
-        """
-        cache_key = (camera_id, track_id)
-        if cache_key in self.track_id_to_person:
-            self.track_id_to_person[cache_key]['timestamp'] = time.time()
 
 
     def cache_master_list(self, person_name, camera_id, track_id):
@@ -339,10 +561,7 @@ class PersonReIDService:
 
     def process_frame_for_reid(self, frame, camera_id):
         """
-        Process frame for person re-identification with database similarity search.
-
-        Main processing function that detects persons, tracks them, and performs
-        person identification using database similarity search with caching.
+        Process frame for person re-identification with BPBreID and voting-based caching.
 
         Args:
             frame (numpy.ndarray): Input video frame
@@ -352,42 +571,45 @@ class PersonReIDService:
             list: List of person re-identification results with tracking and match information
         """
         try:
+            # Poll for new embeddings periodically
+            self.poll_and_load_new_embeddings()
+
             # Detect persons using person detector utility
             person_detections, person_boxes_track = self.person_detector.detect_persons(frame)
 
             now = time.time()
-            # Extract camera number from camera_id (e.g., 'cam_1' -> 1)
             sample_id = int(camera_id.split('_')[1]) - 1
 
             if len(person_boxes_track) > 0:
                 self.last_detection_time[sample_id] = now
             else:
                 last_seen = self.last_detection_time.get(sample_id, now)
-
                 if now - last_seen > 0.1:
-                    # print(f"[DEBUG] No person detected for 0.1s on camera {sample_id}, clearing tracking history")
-                    
                     tracker = self.trackers[camera_id]
                     empty_outputs = torch.tensor([], dtype=torch.float32).reshape(0, 6)
-                    
+
                     if torch.cuda.is_available():
                         empty_outputs = empty_outputs.cuda()
-                    
+
                     try:
                         online_targets = tracker.update(
-                            empty_outputs, 
-                            [frame.shape[0], frame.shape[1]], 
+                            empty_outputs,
+                            [frame.shape[0], frame.shape[1]],
                             (frame.shape[0], frame.shape[1])
                         )
-                        
-                        # Clear cache for this camera when tracking is reset
-                        keys_to_remove = [key for key in self.track_id_to_person.keys() if key[0] == camera_id]
+
+                        # Clear voting and cached tracks for this camera
+                        keys_to_remove = [key for key in self.cached_tracks.keys() if key[0] == camera_id]
                         for key in keys_to_remove:
-                            del self.track_id_to_person[key]
-     
+                            del self.cached_tracks[key]
+
+                        keys_to_remove = [key for key in self.track_voting.keys() if key[0] == camera_id]
+                        for key in keys_to_remove:
+                            del self.track_voting[key]
+
                     except Exception as e:
                         print(f"Error updating tracker with empty values: {e}")
-                    
+
                     self.last_detection_time[sample_id] = now
 
             if not person_detections or not person_boxes_track:
@@ -395,172 +617,192 @@ class PersonReIDService:
 
             target_box = []
             reid_results = []
-            similarity_check = 0
-            
+
             # Prepare detections for tracking
             outputs = self.prepare_detections_for_tracker(person_boxes_track)
-            
+
             if torch.cuda.is_available() and hasattr(self.trackers[camera_id], 'args'):
                 device = getattr(self.trackers[camera_id].args, 'device', 'cpu')
                 if hasattr(device, 'type'):
                     device_str = device.type
                 else:
                     device_str = str(device)
-                
+
                 if 'cuda' in device_str:
                     outputs = outputs.cuda()
-            
+
             try:
                 if outputs is not None and len(outputs) > 0:
                     online_targets = self.trackers[camera_id].update(
-                        outputs, 
-                        [frame.shape[0], frame.shape[1]], 
+                        outputs,
+                        [frame.shape[0], frame.shape[1]],
                         (frame.shape[0], frame.shape[1])
-                    )                   
-                    
+                    )
+
                     for target in online_targets:
-                        target_box.append([target.track_id, target.tlwh[0], target.tlwh[1], 
+                        target_box.append([target.track_id, target.tlwh[0], target.tlwh[1],
                                         target.tlwh[2], target.tlwh[3], target.track_id, camera_id])
-                                                                
+
                 else:
                     online_targets = []
             except Exception as e:
                 traceback.print_exc()
                 return []
-            
-            # Process each target for ReID with database similarity search and caching
+
+            # Process each target for ReID with BPBreID and voting-based caching
             for target in target_box:
                 track_id, x, y, w, h, _, cam_id = target
-                
-                # Check cache first
-                cached_person = self.get_cached_person(cam_id, track_id)
-                
-                if cached_person:
-                    # Use cached result
-                    person_name = cached_person['name']
-                    similarity = cached_person['confidence']
-                    
-                    # Update cache timestamp to keep it alive
-                    self.update_cache_timestamp(cam_id, track_id)
-                    
-                    # Convert coordinates
-                    x1, y1 = int(x), int(y)
-                    x2, y2 = int(x + w), int(y + h)
-                    bbox = [x1, y1, x2, y2]
-                    self.cache_master_list(cached_person['name'], cam_id, track_id)
-                    # Create match object for consistency
-                    match = {
-                        'person_name': person_name,
-                        'similarity': similarity,
-                        'source_camera': 'cached'
-                    } if person_name != "Unknown" else None
-                    
-                    reid_results.append({
-                        'track_id': track_id,
-                        'bbox': [x1, y1, x2, y2],
-                        'match': match,
-                        'similarity': similarity,
-                        'person_name': person_name,
-                        'camera_id': cam_id,
-                        'cached': True  # Flag to indicate this was from cache
-                    })
-                    
+                x1, y1 = int(x), int(y)
+                x2, y2 = int(x + w), int(y + h)
+
+                cache_key = (cam_id, track_id)
+
+                # Check if this track is already cached
+                if cache_key in self.cached_tracks:
+                    person_name = self.cached_tracks[cache_key]['person_id']
+                    result_distance = self.cached_tracks[cache_key]['distance']
+                    is_cached = True
+
                 else:
-                    # No cache hit, perform database ReID
-                    # Convert from TLWH to TLBR
-                    x1, y1 = int(x), int(y)
-                    x2, y2 = int(x + w), int(y + h)
-                    
-                    # Get person crop using person detector utility
+                    # Crop for ReID
                     person_crop = self.person_detector.get_person_crop(frame, [x1, y1, x2, y2], padding=10)
-                    
+
                     if person_crop is None:
-                        print(f"Empty crop for track_id {track_id}, skipping")
                         continue
-                    
-                    try:
-                        # Extract embedding using person embedder
-                        embedding = self.person_embedder.extract_embedding(person_crop)
-                        
-                        if embedding is not None:
-                            # Database similarity search using similarity search utility
-                            match, similarity = self.similarity_search.find_person_match_euclidean(
-                                embedding, threshold=self.similarity_threshold
+
+                    # Convert to RGB
+                    crop_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
+
+                    # Extract embeddings using BPBreID
+                    model_output = self.extractor([crop_rgb])
+                    embeddings, visibility = self.extract_test_embeddings(model_output)
+                    embeddings = embeddings.to(self.device)
+                    visibility = visibility.to(self.device)
+
+                    # Check if gallery is empty
+                    if self.gallery_embeddings.shape[0] == 0:
+                        person_name = "UNKNOWN"
+                        result_distance = 999.0
+                        is_cached = False
+                    else:
+                        # Compute distances using BPBreID distance calculation
+                        with torch.no_grad():
+                            distmat, _ = compute_distance_matrix_using_bp_features(
+                                embeddings,
+                                self.gallery_embeddings,
+                                visibility,
+                                self.gallery_visibility,
+                                dist_combine_strat=self.cfg.test.part_based.dist_combine_strat,
+                                batch_size_pairwise_dist_matrix=self.cfg.test.batch_size_pairwise_dist_matrix,
+                                use_gpu=self.cfg.use_gpu,
+                                metric='euclidean'
                             )
-                            similarity_check += 1
-                            
-                            if match is not None:
-                                person_name = match.get('person_name')
-                                # Try to cache this result if confidence is high
-                                self.cache_person_identification(cam_id, track_id, person_name, similarity)
-                            else:
-                                person_name = "Unknown"
-                                # Cache "Unknown" only if we're very confident it's not a match
-                                if similarity < 0.3:  # Very low similarity, likely not anyone we know
-                                    self.cache_person_identification(cam_id, track_id, person_name, 1.0 - similarity)
-                            
-                            # Store detailed results
-                            reid_results.append({
-                                'track_id': track_id,
-                                'bbox': [x1, y1, x2, y2],
-                                'match': match,
-                                'similarity': similarity,
-                                'person_name': person_name,
-                                'camera_id': cam_id,
-                                'cached': False  # Flag to indicate this was freshly computed
-                            })
-                        else:
-                            print(f"Track ID {track_id}: Failed to extract embedding")
-                            
-                    except Exception as e:
-                        print(f"Error processing track_id {track_id}: {e}")
-                        continue
-            # print("==========================End of reid========================")
+
+                        # Get best match
+                        distances = distmat[0].cpu().numpy()
+                        best_idx = np.argmin(distances)
+                        best_pid = int(self.gallery_pids[best_idx].item())
+                        best_dist = distances[best_idx]
+
+                        person_name = str(best_pid)
+                        result_distance = best_dist
+                        is_cached = False
+
+                        # Voting logic
+                        if cache_key not in self.track_voting:
+                            self.track_voting[cache_key] = {
+                                'votes': {},
+                                'frame_count': 0,
+                                'distances': {}
+                            }
+
+                        voting_entry = self.track_voting[cache_key]
+                        voting_entry['frame_count'] += 1
+
+                        # Count vote if distance < voting_threshold
+                        if best_dist < self.voting_threshold:
+                            if person_name not in voting_entry['votes']:
+                                voting_entry['votes'][person_name] = 0
+                                voting_entry['distances'][person_name] = best_dist
+                            voting_entry['votes'][person_name] += 1
+                            voting_entry['distances'][person_name] = min(
+                                voting_entry['distances'][person_name],
+                                best_dist
+                            )
+
+                        # Check if we've collected enough frames
+                        if voting_entry['frame_count'] >= self.voting_window:
+                            if voting_entry['votes']:
+                                max_votes_id = max(voting_entry['votes'], key=voting_entry['votes'].get)
+                                max_votes = voting_entry['votes'][max_votes_id]
+
+                                if max_votes >= self.min_votes:
+                                    self.cached_tracks[cache_key] = {
+                                        'person_id': max_votes_id,
+                                        'distance': voting_entry['distances'][max_votes_id],
+                                        'votes': max_votes
+                                    }
+                                    print(f"[CACHE] {cam_id} T{track_id} -> ID{max_votes_id} "
+                                          f"(votes={max_votes}/{self.voting_window})")
+
+                                    person_name = max_votes_id
+                                    result_distance = voting_entry['distances'][max_votes_id]
+                                    is_cached = True
+
+                            del self.track_voting[cache_key]
+
+                # Determine if recognized
+                is_recognized = result_distance < self.matching_threshold
+
+                reid_results.append({
+                    'track_id': track_id,
+                    'bbox': [x1, y1, x2, y2],
+                    'person_name': person_name if is_recognized else "UNKNOWN",
+                    'distance': result_distance,
+                    'camera_id': cam_id,
+                    'cached': is_cached,
+                    'match': {'person_name': person_name, 'source_camera': cam_id} if is_recognized else None,
+                    'similarity': 1.0 / (1.0 + result_distance)  # Convert distance to similarity for compatibility
+                })
+
+            # Cleanup disappeared tracks
+            active_track_ids = {(camera_id, target[0]) for target in target_box}
+            disappeared_tracks = set(self.cached_tracks.keys()) - active_track_ids
+            for key in disappeared_tracks:
+                if key[0] == camera_id:
+                    del self.cached_tracks[key]
+
+            disappeared_voting = set(self.track_voting.keys()) - active_track_ids
+            for key in disappeared_voting:
+                if key[0] == camera_id:
+                    del self.track_voting[key]
+
             return reid_results
-            
+
         except Exception as e:
             import traceback
             traceback.print_exc()
             return []
 
-    def cleanup_expired_cache_entries(self):
-        """
-        Periodically clean up expired cache entries.
-
-        Removes cache entries that have exceeded the maximum age to prevent
-        memory leaks and maintain cache freshness.
-        """
-        current_time = time.time()
-        expired_keys = [
-            key for key, value in self.track_id_to_person.items()
-            if current_time - value['timestamp'] > self.cache_expiry_time
-        ]
-        
-        for key in expired_keys:
-            del self.track_id_to_person[key]
-        
-        if expired_keys:
-            print(f"[CACHE CLEANUP] Removed {len(expired_keys)} expired entries")
 
     def get_cache_info(self):
         """
-        Get information about the current cache state.
+        Get information about the current BPBreID voting cache state.
 
-        Returns detailed information about all cached entries including
-        track IDs, person names, confidence scores, and cache age.
+        Returns detailed information about all cached tracks from voting system.
 
         Returns:
             dict: Dictionary containing cache information organized by camera
         """
         cache_info = {}
-        for (camera_id, track_id), data in self.track_id_to_person.items():
+        for (camera_id, track_id), data in self.cached_tracks.items():
             if camera_id not in cache_info:
                 cache_info[camera_id] = []
             cache_info[camera_id].append({
                 'track_id': track_id,
-                'person_name': data['name'],
-                'confidence': data['confidence'],
-                'age_seconds': time.time() - data['timestamp']
+                'person_id': data['person_id'],
+                'distance': data['distance'],
+                'votes': data['votes']
             })
         return cache_info
 
@@ -710,13 +952,12 @@ class PersonReIDService:
         scale_x = new_width / frame.shape[1]
         scale_y = new_height / frame.shape[0]
 
-        # Draw person re-identification results
+        # Draw person re-identification results (using rtsp_reid_inference.py logic)
         for result in reid_results:
             bbox = result['bbox']
-            match = result['match']
-            similarity = result['similarity']
             track_id = result.get('track_id', 'N/A')
             person_name = result.get('person_name', 'Unknown')
+            distance = result.get('distance', 999.0)
             is_cached = result.get('cached', False)
             exercise_info = result.get('exercise', None)  # Get exercise prediction
 
@@ -726,49 +967,29 @@ class PersonReIDService:
             x2 = int(bbox[2] * scale_x) + pad_left
             y2 = int(bbox[3] * scale_y) + pad_top
 
-            # Choose color and label based on match and cache status
-            if match and similarity >= self.similarity_threshold:
-                if is_cached:
-                    color = (0, 255, 0)  # green for cached matches
-                    cache_indicator = " [CACHED]"
-                else:
-                    color = (0, 255, 225)    # yellow for fresh database matches
-                cache_indicator = " [DB]"
+            # Determine if recognized (same as rtsp_reid_inference.py)
+            is_recognized = distance < self.matching_threshold
 
-                label = f"ID:{track_id} {person_name} ({similarity:.2f}){cache_indicator}"
-                if match.get('source_camera') not in ['unknown', 'cached']:
-                    label += f" [{match['source_camera']}]"
+            # Color logic from rtsp_reid_inference.py:
+            # Blue (cached), Green (match), Red (unknown)
+            if is_cached:
+                color = (255, 0, 0)  # Blue
+                label = f"T{track_id}|ID{person_name}* d={distance:.2f}"
+            elif is_recognized:
+                color = (0, 255, 0)  # Green
+                label = f"T{track_id}|ID{person_name} d={distance:.2f}"
             else:
-                if is_cached:
-                    color = (128, 0, 128)  # Purple for cached unknowns
-                    cache_indicator = " [CACHED]"
-                else:
-                    color = (0, 0, 255)    # Red for fresh database unknowns
-                    cache_indicator = " [DB]"
+                color = (0, 0, 255)  # Red
+                label = f"T{track_id}|UNK d={distance:.2f}"
 
-                label = f"ID:{track_id} Unknown ({similarity:.2f}){cache_indicator}"
+            # Draw bounding box
+            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
 
-            # Draw bounding box with thicker line for cached results
-            line_thickness = 3 if is_cached else 2
-            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, line_thickness)
-
-            # Draw tracking ID prominently at top-left of box
-            track_id_text = f"ID:{track_id}"
-            track_id_size = cv2.getTextSize(track_id_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-
-            # Background color for tracking ID (different for cached vs database)
-            bg_color = (255, 255, 0) if not is_cached else (0, 255, 255)  # Yellow for DB, Cyan for cached
-            cv2.rectangle(display_frame, (x1, y1 - track_id_size[1] - 15),
-                        (x1 + track_id_size[0] + 10, y1 - 5), bg_color, -1)
-            cv2.putText(display_frame, track_id_text, (x1 + 5, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-
-            # Draw main label with background
-            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-            cv2.rectangle(display_frame, (x1, y2),
-                        (x1 + label_size[0], y2 + label_size[1] + 10), color, -1)
-            cv2.putText(display_frame, label, (x1, y2 + label_size[1] + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            # Draw main label (same as rtsp_reid_inference.py)
+            (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(display_frame, (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), color, -1)
+            cv2.putText(display_frame, label, (x1 + 5, y1 - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
             # Draw exercise prediction below the main label if available
             if exercise_info:
@@ -816,8 +1037,8 @@ class PersonReIDService:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
         # Cache size info
-        cache_size = len(self.track_id_to_person)
-        cache_info = f"Cache Size: {cache_size}"
+        cache_size = len(self.cached_tracks)
+        cache_info = f"Cached Tracks: {cache_size}"
         cv2.putText(display_frame, cache_info, (10, display_frame.shape[0] - 80),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
@@ -936,11 +1157,7 @@ class PersonReIDService:
                 display = self.create_stable_display()
                 if not os.getenv('HEADLESS'):
                     cv2.imshow(f'Person Re-ID System ({self.num_cameras} cameras)', display)
-                
-                # Cleanup expired cache entries periodically
-                if time.time() % 10 < 0.1:  # Every ~10 seconds
-                    self.cleanup_expired_cache_entries()
-                
+
                 # Handle controls
                 key = cv2.waitKey(33) & 0xFF
         
