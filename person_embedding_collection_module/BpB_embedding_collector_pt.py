@@ -8,6 +8,7 @@ import gi
 import os
 import sys
 import torch
+import random
 from enum import Enum
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,71 @@ class Job:
     camera_id: str
     frame: np.ndarray
     ts: float
+
+
+def apply_brightness_augmentation(crop, brightness_factor=1.5):
+    """
+    Apply high brightness augmentation to a crop.
+
+    Args:
+        crop (np.ndarray): RGB image crop
+        brightness_factor (float): Brightness multiplier (1.5 = 50% brighter)
+
+    Returns:
+        np.ndarray: Brightened crop
+    """
+    # Convert to float for manipulation
+    augmented = crop.astype(np.float32) * brightness_factor
+    # Clip to valid range
+    augmented = np.clip(augmented, 0, 255).astype(np.uint8)
+    return augmented
+
+
+def apply_rotation_augmentation(crop, max_angle=5):
+    """
+    Apply slight rotation augmentation to a crop.
+
+    Args:
+        crop (np.ndarray): RGB image crop
+        max_angle (int): Maximum rotation angle in degrees (both directions)
+
+    Returns:
+        np.ndarray: Rotated crop
+    """
+    angle = random.uniform(-max_angle, max_angle)
+    h, w = crop.shape[:2]
+    center = (w // 2, h // 2)
+
+    # Get rotation matrix
+    rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+    # Apply rotation
+    augmented = cv2.warpAffine(crop, rotation_matrix, (w, h),
+                               flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_REFLECT)
+    return augmented
+
+
+def apply_noise_augmentation(crop, noise_level=15):
+    """
+    Apply Gaussian noise augmentation to a crop.
+
+    Args:
+        crop (np.ndarray): RGB image crop
+        noise_level (int): Standard deviation of Gaussian noise
+
+    Returns:
+        np.ndarray: Noisy crop
+    """
+    # Generate Gaussian noise
+    noise = np.random.normal(0, noise_level, crop.shape).astype(np.float32)
+
+    # Add noise to image
+    augmented = crop.astype(np.float32) + noise
+
+    # Clip to valid range
+    augmented = np.clip(augmented, 0, 255).astype(np.uint8)
+    return augmented
 
 
 class PersonEmbeddingCollector:
@@ -536,26 +602,80 @@ class PersonEmbeddingCollector:
 
                     print(f"[EMBEDDING] Extracted embedding shape: {emb.shape}, visibility shape: {visibility.shape}, took {emb_time:.1f}ms for {person_name} from {job.camera_id}")
 
-                    # Collect embedding in memory (append to list, save later)
+                    # Collect embeddings with augmentation on-the-fly
                     print(f"[COLLECT] Collecting BPBreID embedding for {person_name} from {job.camera_id}")
                     with self.frame_collection_lock:
                         if person_name in self.active_collections:  # Double-check still active
                             cdata = self.active_collections[person_name]
-                            # Append embedding with unsqueeze to add batch dimension
-                            cdata['cameras'][job.camera_id]['embeddings'].append(emb.unsqueeze(0))
-                            cdata['cameras'][job.camera_id]['visibility'].append(visibility.unsqueeze(0))
-                            cdata['cameras'][job.camera_id]['frames_collected'] += 1
-                            cdata['cameras'][job.camera_id]['last_person_box'] = best['bbox']
+                            cam_data = cdata['cameras'][job.camera_id]
+
+                            # Determine augmentation type based on frame count
+                            frame_idx = cam_data['frames_collected']
+
+                            # For each camera, collect 25 frames total:
+                            # - 5 normal (ground truth)
+                            # - 5 high brightness
+                            # - 5 slight rotation
+                            # - 5 noise
+                            # - 5 additional variations
+
+                            augmentation_type = None
+                            if frame_idx < 5:
+                                # First 5: Normal (ground truth)
+                                augmentation_type = "normal"
+                                augmented_crop = crop_rgb
+                            elif frame_idx < 10:
+                                # Next 5: High brightness (randomly select 5 from collected frames)
+                                augmentation_type = "brightness"
+                                augmented_crop = apply_brightness_augmentation(crop_rgb, brightness_factor=2.0)
+                            elif frame_idx < 15:
+                                # Next 5: Slight rotation
+                                augmentation_type = "rotation"
+                                augmented_crop = apply_rotation_augmentation(crop_rgb, max_angle=5)
+                            elif frame_idx < 20:
+                                # Next 5: Noise
+                                augmentation_type = "noise"
+                                augmented_crop = apply_noise_augmentation(crop_rgb, noise_level=15)
+                            else:
+                                # Last 5: Random mix
+                                aug_choice = random.choice(['brightness', 'rotation', 'noise'])
+                                if aug_choice == 'brightness':
+                                    augmentation_type = "brightness_extra"
+                                    augmented_crop = apply_brightness_augmentation(crop_rgb, brightness_factor=0.8)
+                                elif aug_choice == 'rotation':
+                                    augmentation_type = "rotation_extra"
+                                    augmented_crop = apply_rotation_augmentation(crop_rgb, max_angle=10)
+                                else:
+                                    augmentation_type = "noise_extra"
+                                    augmented_crop = apply_noise_augmentation(crop_rgb, noise_level=20)
+
+                            # Extract embedding from augmented crop
+                            t_aug_start = time.time()
+                            aug_emb, aug_visibility = self.person_embedder.extract_embedding(augmented_crop)
+                            aug_time = (time.time() - t_aug_start) * 1000.0
+
+                            if aug_emb is None or aug_visibility is None:
+                                print(f"[AUGMENT] Failed to extract embedding from {augmentation_type} augmented crop")
+                                continue
+
+                            print(f"[AUGMENT] Applied {augmentation_type} augmentation, extracted embedding in {aug_time:.1f}ms")
+
+                            # Append augmented embedding with unsqueeze to add batch dimension
+                            cam_data['embeddings'].append(aug_emb.unsqueeze(0))
+                            cam_data['visibility'].append(aug_visibility.unsqueeze(0))
+                            cam_data['frames_collected'] += 1
+                            cam_data['last_person_box'] = best['bbox']
+                            cam_data['last_augmentation'] = augmentation_type  # For display
+
                             cdata['total_frames_collected'] = sum(
                                 v['frames_collected'] for v in cdata['cameras'].values()
                             )
                             self.debug_counters['embedding_successes'] += 1
 
-                            print(f"[COLLECT] Collected {cdata['cameras'][job.camera_id]['frames_collected']}/{self.target_embeddings_per_person} for {person_name} from {job.camera_id}")
+                            print(f"[COLLECT] Collected {cam_data['frames_collected']}/25 for {person_name} from {job.camera_id} (aug: {augmentation_type})")
 
-                            # If all cameras hit target, complete
-                            done = all(v['frames_collected'] >= self.target_embeddings_per_person
-                                       for v in cdata['cameras'].values())
+                            # If all cameras hit 25 frames, complete
+                            done = all(v['frames_collected'] >= 25 for v in cdata['cameras'].values())
 
                             if done:
                                 self.complete_frame_collection(person_name)
@@ -569,6 +689,10 @@ class PersonEmbeddingCollector:
                         'type': 'person_bpbreid'  # Mark as person detection for BPBreID
                     }]
                     camera_data['detection_timestamp'] = time.time()
+
+                    # Store augmented crop for visualization (convert back to BGR for display)
+                    camera_data['augmented_crop'] = cv2.cvtColor(augmented_crop, cv2.COLOR_RGB2BGR)
+                    camera_data['augmentation_type'] = augmentation_type
 
                     break  # Only collect once per frame
 
@@ -734,8 +858,8 @@ class PersonEmbeddingCollector:
                     'trigger_camera': trigger_camera_id,
                     'start_time': time.time(),
                     'cameras': {
-                        'center': {'frames_collected': 0, 'embeddings': [], 'visibility': [], 'last_person_box': None},
-                        'right': {'frames_collected': 0, 'embeddings': [], 'visibility': [], 'last_person_box': None}
+                        'center': {'frames_collected': 0, 'embeddings': [], 'visibility': [], 'last_person_box': None, 'last_augmentation': None},
+                        'right': {'frames_collected': 0, 'embeddings': [], 'visibility': [], 'last_person_box': None, 'last_augmentation': None}
                     },
                     'total_frames_collected': 0
                 }
@@ -958,7 +1082,14 @@ class PersonEmbeddingCollector:
 
                 if detection_type == 'person_bpbreid':
                     # Person bounding box for BPBreID embedding collection
-                    embedding_status = f"BPBREID EMBEDDING"
+                    # Show augmentation type if available
+                    aug_type = ""
+                    if person_name in self.active_collections:
+                        cam_data = self.active_collections[person_name]['cameras'].get(camera_id, {})
+                        last_aug = cam_data.get('last_augmentation', None)
+                        if last_aug:
+                            aug_type = f" [{last_aug.upper()}]"
+                    embedding_status = f"BPBREID{aug_type}"
                     color = (255, 165, 0)  # Orange for BPBreID person detection
                     thickness = 4  # Thicker for visibility
                     label = f"{person_name} {embedding_status}"
@@ -1089,6 +1220,40 @@ class PersonEmbeddingCollector:
         cv2.putText(display_frame, fps_text, (10, display_frame.shape[0] - 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
+        # Display augmented crop preview if available (bottom-right corner)
+        if 'augmented_crop' in camera_data and camera_data['augmented_crop'] is not None:
+            aug_crop = camera_data['augmented_crop']
+            aug_type = camera_data.get('augmentation_type', 'unknown')
+
+            # Resize crop to fit in preview (max 200x200)
+            crop_h, crop_w = aug_crop.shape[:2]
+            scale = min(200 / crop_w, 200 / crop_h)
+            preview_w = int(crop_w * scale)
+            preview_h = int(crop_h * scale)
+            aug_preview = cv2.resize(aug_crop, (preview_w, preview_h))
+
+            # Position in bottom-right corner
+            preview_x = display_frame.shape[1] - preview_w - 10
+            preview_y = display_frame.shape[0] - preview_h - 50
+
+            # Draw border and overlay
+            cv2.rectangle(display_frame,
+                         (preview_x - 2, preview_y - 2),
+                         (preview_x + preview_w + 2, preview_y + preview_h + 2),
+                         (255, 165, 0), 2)
+            display_frame[preview_y:preview_y+preview_h, preview_x:preview_x+preview_w] = aug_preview
+
+            # Add augmentation label above preview
+            aug_label = f"AUG: {aug_type.upper()}"
+            label_size = cv2.getTextSize(aug_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            cv2.rectangle(display_frame,
+                         (preview_x, preview_y - label_size[1] - 10),
+                         (preview_x + label_size[0], preview_y - 2),
+                         (255, 165, 0), -1)
+            cv2.putText(display_frame, aug_label,
+                       (preview_x, preview_y - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
         return display_frame
 
     def calculate_fps(self, camera_id):
@@ -1201,10 +1366,14 @@ class PersonEmbeddingCollector:
                 total_collected = collection_data['total_frames_collected']
                 elapsed = time.time() - collection_data['start_time']
 
-                # Target is 5 per camera * 2 cameras = 10
-                active_text = f"  {person_name}: {total_collected}/10 collected [C:{center_frames}, R:{right_frames}] ({elapsed:.1f}s)"
+                # Get augmentation types for display
+                center_aug = collection_data['cameras']['center'].get('last_augmentation', 'N/A')
+                right_aug = collection_data['cameras']['right'].get('last_augmentation', 'N/A')
+
+                # Target is 25 per camera * 2 cameras = 50 (with augmentations)
+                active_text = f"  {person_name}: {total_collected}/50 [C:{center_frames}/25 ({center_aug}), R:{right_frames}/25 ({right_aug})] ({elapsed:.1f}s)"
                 cv2.putText(canvas, active_text, (10, y_pos),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 2)
                 y_pos += line_height - 10
 
         # Add debug statistics

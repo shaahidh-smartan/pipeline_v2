@@ -16,7 +16,7 @@ _gstreamer_global_lock = threading.Lock()
 class Camera:
     """Dynamic camera configuration and management class for person re-identification system."""
     
-    def __init__(self, camera_id, config, display_width=640, display_height=480):
+    def __init__(self, camera_id, config, display_width=480, display_height=480):
         """
         Initialize a camera instance.
         

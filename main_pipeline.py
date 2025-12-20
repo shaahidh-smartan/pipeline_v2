@@ -900,7 +900,7 @@ def main():
     #                       "192.168.0.18","192.168.0.110","192.168.0.102",
     #                       "192.168.0.124","192.168.0.123","192.168.0.106",
     #                       "192.168.0.113","192.168.0.111","192.168.0.117","192.168.0.112"]
-    DEFAULT_CAMERA_IPS = ["192.168.0.124","192.168.0.216","192.168.0.110"]
+    DEFAULT_CAMERA_IPS = ["192.168.0.110","192.168.0.124"]
 
     if not check_database_connection():
         return 1
@@ -916,10 +916,10 @@ def main():
     BPBREID_CONFIG_PATH = "configs/test_reid.yaml"
     BPBREID_WEIGHTS_PATH = None  # Will use weights from config file
     BPBREID_GALLERY_DIR = None  # Will load from database dynamically
-    VOTING_THRESHOLD = 5.5  # Distance < 5.5 counts as a vote
-    VOTING_WINDOW = 50
+    VOTING_THRESHOLD = 6.5 # Distance < 5.5 counts as a vote
+    VOTING_WINDOW = 40
     MIN_VOTES = 30
-    MATCHING_THRESHOLD = 5.5  # Distance < 5.5 shows as recognized
+    MATCHING_THRESHOLD = 6.7  # Distance < 5.5 shows as recognized
     DEVICE = 'cuda'
 
     # Initialize BridgeReIDService with BPBreID

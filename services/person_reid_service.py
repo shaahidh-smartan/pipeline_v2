@@ -144,8 +144,8 @@ class PersonReIDService:
             self.trackers[camera_id] = BYTETracker(tracker_args)
         
         # Display configuration
-        self.camera_width = 640
-        self.camera_height = 640
+        self.camera_width = 480
+        self.camera_height = 480
         # Calculate display dimensions based on number of cameras
         self.grid_cols = int(np.ceil(np.sqrt(self.num_cameras)))
         self.grid_rows = int(np.ceil(self.num_cameras / self.grid_cols))
