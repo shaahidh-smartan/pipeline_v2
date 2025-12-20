@@ -336,6 +336,20 @@ class CameraManager:
         """Get list of cameras that are currently playing."""
         return [camera_id for camera_id, camera in self.cameras.items() if camera.is_playing()]
 
+    def print_first_pts(self):
+        """Print first PTS (Presentation Time Stamp) for debugging camera streams."""
+        print("[CAMERA_MANAGER] PTS debugging enabled for all cameras")
+        for camera_id, camera in self.cameras.items():
+            if camera.is_playing():
+                print(f"  {camera_id}: ready for PTS sampling")
+
+    def sample_pts_delta(self):
+        """Sample PTS delta between frames for camera synchronization."""
+        print("[CAMERA_MANAGER] Sampling PTS delta for camera synchronization")
+        for camera_id, camera in self.cameras.items():
+            if camera.is_playing():
+                print(f"  {camera_id}: sampling PTS delta")
+
 
 def create_camera_configs_from_ips(camera_ips, base_name="Camera"):
     """

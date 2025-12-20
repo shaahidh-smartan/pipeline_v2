@@ -604,13 +604,10 @@ class PersonReIDService:
                 if not camera:
                     time.sleep(0.1)
                     continue
-
-                record = camera.get_frame()
-
-                if record is not None:
-                    frame = record["frame"]
-                    pts_ns = record.get("pts_ns", -1)
-                    arrive_ns = record.get("arrive_ns", None)
+                
+                frame = camera.get_frame()
+                                
+                if frame is not None:
                     frame_count = camera.get_frame_count()
                     
                     # Process detection every N frames
@@ -921,9 +918,7 @@ class PersonReIDService:
         
         time.sleep(3)  # Wait for initialization
         self.running = True
-        self.camera_manager.print_first_pts()
-        self.camera_manager.sample_pts_delta()
-
+        
         # Start processing threads for all cameras
         self.processing_threads = []
         for camera_id in self.camera_manager.get_camera_ids():

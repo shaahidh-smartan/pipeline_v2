@@ -1291,13 +1291,24 @@ class PersonEmbeddingCollector:
         Returns:
             None
         """
+        print("Stopping system...")
         self.running = False
+
+        # Give threads time to see running=False
+        time.sleep(0.2)
 
         # Complete any active collections
         with self.frame_collection_lock:
             if self.active_collections:
                 for person_name in list(self.active_collections.keys()):
                     self.complete_frame_collection(person_name)
+
+        # Wait for GPU worker thread to finish
+        if self.gpu_worker_thread and self.gpu_worker_thread.is_alive():
+            print("Waiting for GPU worker thread to finish...")
+            self.gpu_worker_thread.join(timeout=3.0)
+            if self.gpu_worker_thread.is_alive():
+                print("Warning: GPU worker thread did not finish cleanly")
 
         # Stop camera pipelines
         for camera_id in ['center', 'right']:
@@ -1308,8 +1319,12 @@ class PersonEmbeddingCollector:
 
                 thread = self.cameras[camera_id].get('thread')
                 if thread and thread.is_alive():
+                    print(f"Waiting for {camera_id} processing thread to finish...")
                     thread.join(timeout=2.0)
+                    if thread.is_alive():
+                        print(f"Warning: {camera_id} thread did not finish cleanly")
             except Exception as e:
                 print(f"Error stopping {camera_id}: {e}")
 
         cv2.destroyAllWindows()
+        print("System stopped")
