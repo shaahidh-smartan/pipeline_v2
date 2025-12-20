@@ -39,7 +39,7 @@ def create_camera_config():
     return [
         {
             'name': 'Center Camera',
-            'url': 'rtsp://admin:admin%40123@192.168.0.110:554/stream1',
+            'url': 'rtsp://admin:admin%40123@192.168.0.124:554/stream1',
             'width': 640,
             'height': 640
         },
