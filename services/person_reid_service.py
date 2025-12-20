@@ -522,40 +522,47 @@ class PersonReIDService:
         Append cached person to master list and save to database once per unique track.
 
         Saves person identification to both master list and database, ensuring
-        each unique track is only logged once.
+        each unique track is only logged once. The person_name is actually the
+        PID (person_id) from the BPBreID gallery.
 
         Args:
-            person_name (str): Identified person name
+            person_name (str): String representation of person_id (PID) from gallery
             camera_id (str): Camera identifier
             track_id (int): Track identifier
         """
         if person_name != "Unknown":
             # Create unique key for this track
             track_key = (camera_id, track_id, person_name)
-            
+
             # Only save if we haven't saved this track before
             if track_key not in self.logged_tracks:
                 # Add to master list
                 entry = {
                     'person_name': person_name,
-                    'camera_id': camera_id, 
+                    'camera_id': camera_id,
                     'track_id': track_id,
                     'timestamp': time.time()
                 }
                 self.master_person_list.append(entry)
-                
-                # Insert into database only
+
+                # Insert into database with global_id (PID) directly
                 try:
-                    db_success = self.db_manager.insert_person_reid_log(person_name, camera_id, track_id)
-                    
+                    # person_name is the string representation of PID
+                    # Convert to integer for global_id
+                    global_id = int(person_name)
+
+                    db_success = self.db_manager.insert_person_reid_log(
+                        person_name, camera_id, track_id, global_id=global_id
+                    )
+
                     if db_success:
-                        print(f"[DB SAVED] {person_name} detected on {camera_id} with track {track_id}")
+                        print(f"[DB SAVED] PID {global_id} detected on {camera_id} with track {track_id}")
                     else:
-                        print(f"[DB FAILED] {person_name} detected on {camera_id} with track {track_id}")
-                    
+                        print(f"[DB FAILED] PID {global_id} detected on {camera_id} with track {track_id}")
+
                     # Mark this track as saved
                     self.logged_tracks.add(track_key)
-                    
+
                 except Exception as e:
                     print(f"Error saving to database: {e}")
 
@@ -748,6 +755,9 @@ class PersonReIDService:
                                     person_name = max_votes_id
                                     result_distance = voting_entry['distances'][max_votes_id]
                                     is_cached = True
+
+                                    # Save to database (person_reid_mapped table)
+                                    self.cache_master_list(max_votes_id, cam_id, track_id)
 
                             del self.track_voting[cache_key]
 
@@ -991,20 +1001,20 @@ class PersonReIDService:
             cv2.putText(display_frame, label, (x1 + 5, y1 - 5),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # Draw exercise prediction below the main label if available
+            # Draw exercise prediction below the bounding box if available
             if exercise_info:
                 exercise_text = f"Exercise: {exercise_info}"
-                exercise_size = cv2.getTextSize(exercise_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                (exercise_w, exercise_h), _ = cv2.getTextSize(exercise_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
 
-                # Position below the main label
-                exercise_y = y2 + label_size[1] + 20
+                # Position below the bounding box
+                exercise_y = y2 + 5
 
                 # Use orange background for exercise predictions
                 exercise_bg_color = (0, 165, 255)  # Orange
                 cv2.rectangle(display_frame, (x1, exercise_y),
-                        (x1 + exercise_size[0] + 10, exercise_y + exercise_size[1] + 10),
+                        (x1 + exercise_w + 10, exercise_y + exercise_h + 10),
                             exercise_bg_color, -1)
-                cv2.putText(display_frame, exercise_text, (x1 + 5, exercise_y + exercise_size[1] + 5),
+                cv2.putText(display_frame, exercise_text, (x1 + 5, exercise_y + exercise_h + 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
                 # Add a small exercise indicator icon (circle with "E")

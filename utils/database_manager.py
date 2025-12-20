@@ -406,26 +406,35 @@ class DatabaseManager:
             print(f"[ERROR] Failed to insert face embedding: {e}")
             return False
 
-    def insert_person_reid_log(self, person_name, camera_id, track_id):
-        """Insert person re-identification log into database."""
+    def insert_person_reid_log(self, person_name, camera_id, track_id, global_id=None):
+        """
+        Insert person re-identification log into database.
+
+        Args:
+            person_name: String representation of person_id (for compatibility)
+            camera_id: Camera identifier
+            track_id: Track identifier
+            global_id: Person ID (PID) from face_embeddings table to link directly
+        """
         try:
             conn = self.get_connection()
             if not conn:
                 return False
-            
+
             cur = conn.cursor()
-            
+
+            # Insert with global_id directly (avoiding trigger function)
             cur.execute("""
-                INSERT INTO person_reid_mapped (person_name, camera_id, track_id)
-                VALUES (%s, %s, %s)
+                INSERT INTO person_reid_mapped (person_name, camera_id, track_id, global_id)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (person_name, camera_id, track_id, detection_timestamp) DO NOTHING
-            """, (person_name, camera_id, track_id))
-            
+            """, (person_name, camera_id, track_id, global_id))
+
             conn.commit()
             cur.close()
             conn.close()
             return True
-            
+
         except Exception as e:
             print(f"[ERROR] Failed to insert person reid log: {e}")
             return False

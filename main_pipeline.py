@@ -916,10 +916,10 @@ def main():
     BPBREID_CONFIG_PATH = "configs/test_reid.yaml"
     BPBREID_WEIGHTS_PATH = None  # Will use weights from config file
     BPBREID_GALLERY_DIR = None  # Will load from database dynamically
-    VOTING_THRESHOLD = 4.0
+    VOTING_THRESHOLD = 5.5  # Distance < 5.5 counts as a vote
     VOTING_WINDOW = 50
     MIN_VOTES = 30
-    MATCHING_THRESHOLD = 5.0
+    MATCHING_THRESHOLD = 5.5  # Distance < 5.5 shows as recognized
     DEVICE = 'cuda'
 
     # Initialize BridgeReIDService with BPBreID
