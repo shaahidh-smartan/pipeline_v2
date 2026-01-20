@@ -1,6 +1,10 @@
 timestamp,camera_id,track_id,exercise,exercise_conf,reps,rep_conf,frame_count,voting_cycle_id,vote_counts,batches_used,batch_ids,global_counters,entry_index,weight,weight_conf
-2025-12-20 17:33:27.015012,cam_2,1,DB Lunges,0.777,,0.284,192,cam_2_1_1766232206,"{'DB Lunges': 2, 'Hammer Curl': 1}",3,"[4, 3, 7]","[4, 11, 15]",0,unknown,0.000
-2025-12-20 17:33:34.931799,cam_2,1,DB Lunges,0.635,,0.397,192,cam_2_1_1766232214,{'DB Lunges': 3},3,"[0, 1, 2]","[16, 17, 18]",1,unknown,0.000
-2025-12-20 17:33:42.949249,cam_2,1,DB Lunges,0.825,1,0.488,192,cam_2_1_1766232222,{'DB Lunges': 3},3,"[3, 4, 5]","[19, 20, 21]",2,unknown,0.000
-2025-12-20 17:34:11.937352,cam_2,1,DB Lunges,0.569,,0.217,192,cam_2_1_1766232251,{'DB Lunges': 3},3,"[6, 7, 0]","[22, 31, 32]",3,unknown,0.000
-2025-12-20 17:34:19.923301,cam_2,1,DB Lunges,0.718,,0.417,192,cam_2_1_1766232259,{'DB Lunges': 3},3,"[1, 2, 3]","[33, 34, 35]",4,unknown,0.000
+2026-01-20 14:20:11.083011,cam_1,1,kb_shrugs,0.796,,0.253,192,cam_1_1_1768899010,"{'kb_shrugs': 2, 'db_tricep_kickback': 1}",3,"[6, 7, 0]","[6, 7, 8]",0,unknown,0.000
+2026-01-20 14:20:18.683639,cam_1,1,db_tricep_kickback,0.836,2,0.642,192,cam_1_1_1768899018,{'db_tricep_kickback': 3},3,"[1, 2, 3]","[9, 10, 11]",1,unknown,0.000
+2026-01-20 14:20:26.559181,cam_1,1,renegade_rows_db,0.843,,0.364,192,cam_1_1_1768899026,"{'db_tricep_kickback': 1, 'renegade_rows_db': 2}",3,"[4, 5, 6]","[12, 13, 14]",2,unknown,0.000
+2026-01-20 14:20:57.844347,cam_1,5,romanian_deadlift_db,0.786,1,0.452,192,cam_1_5_1768899057,"{'kb_shrugs': 1, 'romanian_deadlift_db': 2}",3,"[0, 1, 2]","[0, 1, 2]",0,unknown,0.000
+2026-01-20 14:21:13.183187,cam_1,5,kb_overhead_press,0.870,4,0.822,192,cam_1_5_1768899073,"{'kb_halo': 1, 'kb_overhead_press': 2}",3,"[6, 7, 0]","[6, 7, 8]",1,unknown,0.000
+2026-01-20 14:21:23.413148,cam_1,5,db_rows,0.983,5,0.622,192,cam_1_5_1768899083,"{'kb_overhead_press': 1, 'db_rows': 2}",3,"[1, 3, 4]","[9, 11, 12]",2,unknown,0.000
+2026-01-20 14:22:02.612774,cam_1,10,kb_clean and press,0.691,,0.258,192,cam_1_10_1768899122,{'kb_clean and press': 3},3,"[3, 0, 1]","[3, 8, 9]",0,unknown,0.000
+2026-01-20 14:22:17.968817,cam_1,10,kb_clean and press,0.861,,0.261,192,cam_1_10_1768899137,"{'kb_clean and press': 2, 'Banded_curls': 1}",3,"[2, 5, 7]","[10, 13, 15]",1,unknown,0.000
+2026-01-20 14:22:25.591506,cam_1,10,kb_overhead_press,0.568,1,0.530,192,cam_1_10_1768899145,{'kb_overhead_press': 3},3,"[0, 1, 2]","[16, 17, 18]",2,unknown,0.000

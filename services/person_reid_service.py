@@ -258,7 +258,7 @@ class PersonReIDService:
 
             results = cur.fetchall()
             cur.close()
-            conn.close()
+            self.db_manager.return_connection(conn)
 
             if not results:
                 print("        No CONSUMED embeddings found in database")
@@ -329,7 +329,7 @@ class PersonReIDService:
 
             results = cur.fetchall()
             cur.close()
-            conn.close()
+            self.db_manager.return_connection(conn)
 
             new_embeddings = []
             for row in results:
@@ -389,7 +389,7 @@ class PersonReIDService:
 
             conn.commit()
             cur.close()
-            conn.close()
+            self.db_manager.return_connection(conn)
 
             print(f"[DB] Updated person_id={person_id} to status={status}")
             return True
@@ -856,10 +856,12 @@ class PersonReIDService:
                 if not camera:
                     time.sleep(0.1)
                     continue
-                
-                frame = camera.get_frame()
-                                
-                if frame is not None:
+
+                record = camera.get_frame()
+
+                if record is not None:
+                    # Extract frame from record dict (camera.py now returns dict with metadata)
+                    frame = record["frame"] if isinstance(record, dict) else record
                     frame_count = camera.get_frame_count()
                     
                     # Process detection every N frames
