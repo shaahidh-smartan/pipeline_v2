@@ -44,6 +44,11 @@ REDIS_PORT = 6379
 REDIS_STREAM = "smpl_frames"
 REDIS_MAX_QUEUE_LEN = 100  # Prevent queue overflow
 
+# ==========================================
+# Person Embedding Redis Configuration
+# ==========================================
+REDIS_EMBEDDING_STREAM = "person_embeddings"  # Stream for receiving embeddings from collector
+
 # Websocket configuration (FALLBACK - kept for compatibility)
 WS_URL = "ws://localhost:8765"
 
@@ -304,6 +309,12 @@ class BridgeReIDService(PersonReIDService):
         if USE_REDIS:
             self._init_redis_connection()
 
+        # Redis embedding consumer thread
+        self.embedding_consumer_thread = None
+        self.embedding_consumer_running = False
+        if USE_REDIS and self.redis_client is not None:
+            self._start_embedding_consumer()
+
         # Websocket connection for SMPL (FALLBACK - commented out by default)
         # Uncomment the block below to use WebSocket instead of Redis
         # self.ws_connection = None
@@ -474,6 +485,15 @@ class BridgeReIDService(PersonReIDService):
                 
         except Exception as db_error:
             print(f"[DB_ERROR] Exercise database logging failed: {db_error}")
+
+    def poll_and_load_new_embeddings(self):
+        """
+        Override parent method - no-op since we use Redis streaming instead of DB polling.
+
+        Embeddings are now received via Redis stream consumer thread (_embedding_consumer_loop)
+        which provides instant updates without polling overhead.
+        """
+        pass  # No-op: Redis consumer handles embedding loading
 
     def process_frame_for_reid(self, frame, camera_id):
         """
@@ -788,6 +808,101 @@ class BridgeReIDService(PersonReIDService):
             print(f"[REDIS] ERROR: Failed to connect to Redis: {e}")
             print("[REDIS] Make sure Redis is running: sudo systemctl start redis")
             self.redis_client = None
+
+    def _start_embedding_consumer(self):
+        """Start the Redis embedding consumer thread."""
+        self.embedding_consumer_running = True
+        self.embedding_consumer_thread = threading.Thread(
+            target=self._embedding_consumer_loop,
+            daemon=True
+        )
+        self.embedding_consumer_thread.start()
+        print(f"[REDIS] ✓ Embedding consumer started on stream: {REDIS_EMBEDDING_STREAM}")
+
+    def _embedding_consumer_loop(self):
+        """
+        Consumer loop that listens for new embeddings from the embedding collector.
+
+        Runs in a background thread and processes new embeddings as they arrive
+        via Redis Streams, adding them to the gallery immediately.
+        """
+        # Track last ID read from stream
+        last_id = '0'  # Start from beginning on first run
+
+        while self.embedding_consumer_running:
+            try:
+                if self.redis_client is None:
+                    time.sleep(1)
+                    continue
+
+                # Block for up to 1 second waiting for new messages
+                # This allows the thread to check embedding_consumer_running periodically
+                messages = self.redis_client.xread(
+                    {REDIS_EMBEDDING_STREAM: last_id},
+                    count=10,
+                    block=1000  # 1 second timeout
+                )
+
+                if not messages:
+                    continue
+
+                # Process each message
+                for stream_name, stream_messages in messages:
+                    for message_id, message_data in stream_messages:
+                        try:
+                            # Deserialize the embedding data
+                            serialized_data = message_data.get(b'data')
+                            if serialized_data is None:
+                                continue
+
+                            payload = pickle.loads(serialized_data)
+
+                            person_name = payload.get('person_name')
+                            face_id = payload.get('face_id')
+                            embeddings = payload.get('embeddings')
+                            visibility = payload.get('visibility')
+                            pids = payload.get('pids')
+
+                            if embeddings is None or visibility is None or pids is None:
+                                print(f"[REDIS_CONSUMER] Invalid payload for {person_name}")
+                                continue
+
+                            # Move tensors to device
+                            embeddings = embeddings.to(self.device)
+                            visibility = visibility.to(self.device)
+                            pids = pids.to(self.device)
+
+                            # Add to gallery
+                            success = self.add_to_gallery(embeddings, visibility, pids)
+
+                            if success:
+                                print(f"[REDIS_CONSUMER] ✓ Loaded embeddings for {person_name} (face_id={face_id})")
+                                print(f"[REDIS_CONSUMER]   - Shape: {embeddings.shape}")
+                                print(f"[REDIS_CONSUMER]   - Gallery size: {self.gallery_embeddings.shape[0]} samples")
+                            else:
+                                print(f"[REDIS_CONSUMER] ✗ Failed to add {person_name} to gallery")
+
+                        except Exception as e:
+                            print(f"[REDIS_CONSUMER] Error processing message: {e}")
+
+                        # Update last_id to acknowledge this message
+                        last_id = message_id.decode() if isinstance(message_id, bytes) else message_id
+
+            except Exception as e:
+                print(f"[REDIS_CONSUMER] Consumer error: {e}")
+                time.sleep(1)  # Brief pause before retrying
+
+        print("[REDIS_CONSUMER] Consumer thread stopped")
+
+    def _stop_embedding_consumer(self):
+        """Stop the Redis embedding consumer thread."""
+        self.embedding_consumer_running = False
+        if self.embedding_consumer_thread and self.embedding_consumer_thread.is_alive():
+            self.embedding_consumer_thread.join(timeout=3.0)
+            if self.embedding_consumer_thread.is_alive():
+                print("[REDIS_CONSUMER] Warning: Consumer thread did not stop cleanly")
+            else:
+                print("[REDIS_CONSUMER] Consumer thread stopped")
 
     def buffer_frame_for_smpl(self, frame, reid_result, camera_id, track_id):
         """
@@ -1186,6 +1301,9 @@ class BridgeReIDService(PersonReIDService):
 
         Clears weight detection cache and calls parent class cleanup methods.
         """
+        # Stop embedding consumer thread first
+        self._stop_embedding_consumer()
+
         # Close database connection pool
         from utils.database_manager import DatabaseManager
         DatabaseManager.close_all_connections()

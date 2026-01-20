@@ -145,6 +145,14 @@ class SingleCameraCollector:
             'embedding_successes': 0
         }
 
+        # Designated zone for person positioning (normalized coordinates for 640x480)
+        self.designated_zone = np.array([[478, 484], [757, 481], [802, 655], [439, 661]])
+
+        # Person tracking for zone-based collection
+        self.person_tracking_lock = threading.Lock()
+        self.waiting_person = None  # {'name': str, 'face_id': int, 'entered_zone_time': float}
+        self.countdown_duration = 2.0  # seconds to wait before starting collection
+
         # Performance tracking
         self.fps_counters = {'camera': 0}
         self.fps_start_times = {'camera': time.time()}
@@ -304,6 +312,24 @@ class SingleCameraCollector:
             print(f"[COLLECTION] {person_name} has unknown status '{status}' - allowing collection")
             return True
 
+    def is_person_in_zone(self, bbox):
+        """
+        Check if person's feet (bottom-right corner of bbox) is inside the designated zone.
+
+        Args:
+            bbox (list): Bounding box [x1, y1, x2, y2]
+
+        Returns:
+            bool: True if person's feet are in zone, False otherwise
+        """
+        # Use bottom-right corner (x2, y2) which represents the person's feet position
+        feet_x = bbox[2]  # x_max (right side of bbox)
+        feet_y = bbox[3]  # y_max (bottom of bbox, where feet are)
+
+        # Use OpenCV point-in-polygon test
+        result = cv2.pointPolygonTest(self.designated_zone.astype(np.float32), (float(feet_x), float(feet_y)), False)
+        return result >= 0  # >= 0 means inside or on the boundary
+
     def gpu_worker_loop(self):
         """GPU worker thread that processes face detection and person embedding jobs."""
         # Initialize models
@@ -346,62 +372,128 @@ class SingleCameraCollector:
                 mode = self.mode
 
             if mode == Mode.FACES:
-                # Only accept FACE jobs from camera
-                if job.kind != 'FACE' or job.camera_id != 'camera':
-                    continue
+                # Process both FACE and PERSON jobs in FACES mode
+                if job.kind == 'FACE' and job.camera_id == 'camera':
+                    # Face detection and recognition
+                    t0 = time.time()
+                    face_results = self.face_pipeline.process_frame(job.frame, thresh=0.5, input_size=(640, 640))
+                    infer_ms = (time.time() - t0) * 1000.0
+                    self._stats['face_qwait_ms'].append(q_wait_ms)
+                    self._stats['face_infer_ms'].append(infer_ms)
 
-                t0 = time.time()
-                face_results = self.face_pipeline.process_frame(job.frame, thresh=0.5, input_size=(640, 640))
-                infer_ms = (time.time() - t0) * 1000.0
-                self._stats['face_qwait_ms'].append(q_wait_ms)
-                self._stats['face_infer_ms'].append(infer_ms)
+                    # Recognize faces
+                    recognized_faces = []
+                    self.debug_counters['face_detections'] += len(face_results)
+                    print(f"[FACE] Detected {len(face_results)} faces in camera")
 
-                # Recognize & start collection
-                recognized_faces = []
-                self.debug_counters['face_detections'] += len(face_results)
-                print(f"[FACE] Detected {len(face_results)} faces in camera")
+                    for face_data in face_results:
+                        if face_data.get('embedding') is None:
+                            print(f"[FACE] No embedding extracted for detected face in {job.camera_id}")
+                            continue
 
-                for face_data in face_results:
-                    if face_data.get('embedding') is None:
-                        print(f"[FACE] No embedding extracted for detected face in {job.camera_id}")
-                        continue
-                    match, sim = self.similarity_search.find_face_match_euclidean(
-                        face_data['embedding'], threshold=self.similarity_threshold
-                    )
-                    if match:
-                        self.debug_counters['recognized_faces'] += 1
-                        recognized_faces.append((face_data, match))
-                        print(f"[FACE] Recognized: {match['name']} (similarity: {sim:.3f})")
-                    else:
-                        print(f"[FACE] Face detected but no match found (best similarity: {sim:.3f}, threshold: {self.similarity_threshold})")
+                        # Convert similarity threshold to distance threshold
+                        distance_threshold = (1.0 / self.similarity_threshold) - 1.0
 
-                if recognized_faces:
-                    # Start collection for the first recognized person
-                    _, match = recognized_faces[0]
-                    person_name = match['name']
-                    face_id = match['id']
-
-                    # Check if we should start collection based on status
-                    if not self.should_start_collection(person_name, face_id):
-                        continue
-
-                    with self.collection_lock:
-                        if self.active_collection is None:
-                            print(f"[COLLECTION] Starting collection for {person_name} (face_id={face_id})")
-                            self.active_collection = {
-                                'person_name': person_name,
-                                'face_id': face_id,
-                                'start_time': time.time(),
-                                'embeddings': [],
-                                'visibility': [],
-                                'frames_collected': 0
-                            }
-                            # Switch mode to COLLECT
-                            with self.mode_lock:
-                                self.mode = Mode.COLLECT
-                            print(f"[MODE] Switched to COLLECT mode for {person_name}")
+                        match, sim = self.similarity_search.find_face_match_euclidean(
+                            face_data['embedding'], threshold=distance_threshold
+                        )
+                        if match:
+                            self.debug_counters['recognized_faces'] += 1
+                            recognized_faces.append((face_data, match))
+                            print(f"[FACE] Recognized: {match['name']} (similarity: {sim:.3f})")
                         else:
-                            print(f"[COLLECTION] Already collecting for {self.active_collection['person_name']}, ignoring {person_name}")
+                            print(f"[FACE] Face detected but no match found (best similarity: {sim:.3f}, threshold: {self.similarity_threshold})")
+
+                    # Update camera display with face detections
+                    camera_data = self.cameras[job.camera_id]
+                    camera_data['persistent_detections'] = []
+                    for face_data, match in recognized_faces:
+                        camera_data['persistent_detections'].append({
+                            'bbox': face_data['bbox'],
+                            'match': match,
+                            'confidence': face_data['confidence'],
+                            'type': 'face'
+                        })
+                    camera_data['detection_timestamp'] = time.time()
+
+                    # Mark person as waiting if face recognized
+                    if recognized_faces:
+                        _, match = recognized_faces[0]
+                        person_name = match['name']
+                        face_id = match['id']
+
+                        with self.person_tracking_lock:
+                            # Check if we should start collection for this person
+                            if self.should_start_collection(person_name, face_id):
+                                # If same person or no one waiting, set/update waiting person
+                                if self.waiting_person is None or self.waiting_person['name'] == person_name:
+                                    if self.waiting_person is None:
+                                        self.waiting_person = {
+                                            'name': person_name,
+                                            'face_id': face_id,
+                                            'entered_zone_time': None
+                                        }
+                                        print(f"[WAITING] {person_name} recognized, waiting for them to enter zone...")
+                                    # If same person, just refresh (keep existing state)
+                                else:
+                                    # Different person recognized while someone waiting - ignore for now
+                                    print(f"[WAITING] {person_name} recognized but {self.waiting_person['name']} is already waiting")
+
+                elif job.kind == 'PERSON':
+                    # Person detection to track zone entry
+                    t0 = time.time()
+                    person_dets, _ = self.person_detector.detect_persons(job.frame)
+                    infer_ms = (time.time() - t0) * 1000.0
+                    self._stats['person_qwait_ms'].append(q_wait_ms)
+                    self._stats['person_infer_ms'].append(infer_ms)
+
+                    print(f"[PERSON] Detected {len(person_dets)} persons in {job.camera_id} camera")
+
+                    # Check if waiting person is in zone
+                    with self.person_tracking_lock:
+                        if self.waiting_person is not None and person_dets:
+                            best_person = max(person_dets, key=lambda p: p['confidence'])
+                            person_name = self.waiting_person['name']
+
+                            if self.is_person_in_zone(best_person['bbox']):
+                                # Person entered zone
+                                if self.waiting_person['entered_zone_time'] is None:
+                                    self.waiting_person['entered_zone_time'] = time.time()
+                                    print(f"[ZONE] {person_name} entered zone! Starting {self.countdown_duration}s countdown...")
+
+                                # Check if countdown completed
+                                elapsed = time.time() - self.waiting_person['entered_zone_time']
+                                if elapsed >= self.countdown_duration:
+                                    # Start collection!
+                                    face_id = self.waiting_person['face_id']
+
+                                    print(f"[COLLECTION] Countdown complete! Starting collection for {person_name}")
+
+                                    with self.collection_lock:
+                                        if self.active_collection is None:
+                                            self.active_collection = {
+                                                'person_name': person_name,
+                                                'face_id': face_id,
+                                                'start_time': time.time(),
+                                                'embeddings': [],
+                                                'visibility': [],
+                                                'frames_collected': 0
+                                            }
+
+                                    # Switch mode to COLLECT
+                                    with self.mode_lock:
+                                        self.mode = Mode.COLLECT
+
+                                    # Clear waiting person
+                                    self.waiting_person = None
+                                    print(f"[MODE] Switched to COLLECT mode for {person_name}")
+                                else:
+                                    print(f"[COUNTDOWN] {person_name} in zone: {elapsed:.1f}/{self.countdown_duration}s")
+                            else:
+                                # Person left zone, reset countdown
+                                if self.waiting_person['entered_zone_time'] is not None:
+                                    print(f"[ZONE] {person_name} left zone, resetting countdown")
+                                    self.waiting_person['entered_zone_time'] = None
 
             else:  # COLLECT
                 if job.kind != 'PERSON' or job.camera_id != 'camera':
@@ -615,12 +707,24 @@ class SingleCameraCollector:
 
                     should_detect = (frame_count % self.detection_interval == 0)
 
-                    # Camera sends FACE jobs in FACES mode
-                    if mode == Mode.FACES and camera_id == 'camera' and should_detect:
-                        try:
-                            self.job_q.put_nowait(Job('FACE', camera_id, frame, time.time()))
-                        except:
-                            pass
+                    if mode == Mode.FACES:
+                        # Camera sends FACE jobs for face recognition
+                        if camera_id == 'camera' and should_detect:
+                            try:
+                                self.job_q.put_nowait(Job('FACE', camera_id, frame, time.time()))
+                            except:
+                                pass  # drop if queue full
+
+                        # Camera sends PERSON jobs for zone tracking when someone is waiting
+                        if camera_id == 'camera':
+                            with self.person_tracking_lock:
+                                has_waiting_person = self.waiting_person is not None
+
+                            if has_waiting_person and should_detect:
+                                try:
+                                    self.job_q.put_nowait(Job('PERSON', camera_id, frame, time.time()))
+                                except:
+                                    pass  # drop if queue full
 
                     # Camera sends PERSON jobs in COLLECT mode
                     elif mode == Mode.COLLECT and camera_id == 'camera':
@@ -712,6 +816,59 @@ class SingleCameraCollector:
             cv2.putText(display_frame, label, (x1, y1 - 5),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
+        # Draw designated zone polygon (scaled to display coordinates)
+        zone_points = []
+        for point in self.designated_zone:
+            x_scaled = int(point[0] * scale_x) + pad_left
+            y_scaled = int(point[1] * scale_y) + pad_top
+            zone_points.append([x_scaled, y_scaled])
+        zone_points = np.array(zone_points, dtype=np.int32)
+
+        # Draw zone with different colors based on state
+        with self.person_tracking_lock:
+            if self.waiting_person is not None:
+                if self.waiting_person['entered_zone_time'] is not None:
+                    # Person in zone - countdown active (green)
+                    zone_color = (0, 255, 0)
+                    zone_thickness = 3
+                else:
+                    # Person recognized but not in zone yet (yellow)
+                    zone_color = (0, 255, 255)
+                    zone_thickness = 2
+            else:
+                # No waiting person (magenta)
+                zone_color = (255, 0, 255)
+                zone_thickness = 2
+
+        cv2.polylines(display_frame, [zone_points], isClosed=True, color=zone_color, thickness=zone_thickness)
+
+        # Add countdown text if person is in zone
+        with self.person_tracking_lock:
+            if self.waiting_person is not None and self.waiting_person['entered_zone_time'] is not None:
+                elapsed = time.time() - self.waiting_person['entered_zone_time']
+                remaining = max(0, self.countdown_duration - elapsed)
+                person_name = self.waiting_person['name']
+
+                countdown_text = f"{person_name}: {remaining:.1f}s"
+                text_size = cv2.getTextSize(countdown_text, cv2.FONT_HERSHEY_SIMPLEX, 1.5, 3)[0]
+
+                # Calculate center of zone for text placement
+                zone_center_x = int(np.mean(zone_points[:, 0]))
+                zone_center_y = int(np.mean(zone_points[:, 1]))
+
+                text_x = zone_center_x - text_size[0] // 2
+                text_y = zone_center_y + text_size[1] // 2
+
+                # Draw text background
+                cv2.rectangle(display_frame,
+                            (text_x - 10, text_y - text_size[1] - 10),
+                            (text_x + text_size[0] + 10, text_y + 10),
+                            (0, 0, 0), -1)
+
+                # Draw countdown text
+                cv2.putText(display_frame, countdown_text, (text_x, text_y),
+                          cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+
         # Add camera info
         camera_name = camera_data['config'].get('name', 'Camera')
 
@@ -731,6 +888,19 @@ class SingleCameraCollector:
                 active_text = f"Collecting: {self.active_collection['person_name']} ({self.active_collection['frames_collected']}/{self.target_embeddings_per_person})"
                 cv2.putText(display_frame, active_text, (10, 120),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+        # Add waiting person status
+        with self.person_tracking_lock:
+            if self.waiting_person is not None:
+                person_name = self.waiting_person['name']
+                if self.waiting_person['entered_zone_time'] is None:
+                    wait_text = f"WAITING: {person_name} - Enter Zone"
+                    wait_color = (0, 255, 255)
+                else:
+                    wait_text = f"COUNTDOWN: {person_name} in zone"
+                    wait_color = (0, 255, 0)
+                cv2.putText(display_frame, wait_text, (10, 160),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.8, wait_color, 2)
 
         # Add FPS
         fps_text = f"FPS: {self.current_fps[camera_id]}"

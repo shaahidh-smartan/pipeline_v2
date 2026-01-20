@@ -27,25 +27,16 @@ from BpB_embedding_collector_pt import PersonEmbeddingCollector
 
 
 def create_camera_config():
-    """
-    Create configuration for 4 RTSP cameras.
-
-    Args:
-        None
-
-    Returns:
-        list: List of 4 camera configuration dictionaries
-    """
     return [
         {
             'name': 'Center Camera',
-            'url': 'rtsp://admin:admin%40123@192.168.0.124:554/stream1',
+            'url': 'rtsp://admin:admin%40123@192.168.0.216:554/stream1',
             'width': 640,
             'height': 640
         },
         {
             'name': 'Right Camera',
-            'url': 'rtsp://admin:admin%40123@192.168.0.216:554/stream1',
+            'url': 'rtsp://admin:admin%40123@192.168.0.106:554/stream1',
             'width': 640,
             'height': 640
         }

@@ -34,8 +34,8 @@ class SimilaritySearch:
             
             row = cur.fetchone()
             cur.close()
-            conn.close()
-            
+            self.db_manager.return_connection(conn)
+
             if row:
                 person_name, similarity = row
                 return {
@@ -43,11 +43,13 @@ class SimilaritySearch:
                     'similarity': float(similarity),
                     'match_type': 'cosine'
                 }, float(similarity)
-            
+
             return None, 0.0
-            
+
         except Exception as e:
             print(f"[ERROR] Face cosine search failed: {e}")
+            if conn:
+                self.db_manager.return_connection(conn)
             return None, 0.0
     
     def find_face_match_euclidean(self, query_embedding, threshold=0.8):
@@ -76,7 +78,7 @@ class SimilaritySearch:
 
             row = cur.fetchone()
             cur.close()
-            conn.close()
+            self.db_manager.return_connection(conn)
 
             if row:
                 face_id, person_name, distance = row
@@ -89,11 +91,13 @@ class SimilaritySearch:
                     'match_type': 'euclidean',
                     'distance': float(distance)
                 }, float(similarity)
-            
+
             return None, 0.0
-            
+
         except Exception as e:
             print(f"[ERROR] Face euclidean search failed: {e}")
+            if conn:
+                self.db_manager.return_connection(conn)
             return None, 0.0
     
     def find_person_match_cosine(self, query_embedding, threshold=0.8):
@@ -121,8 +125,8 @@ class SimilaritySearch:
             
             row = cur.fetchone()
             cur.close()
-            conn.close()
-            
+            self.db_manager.return_connection(conn)
+
             if row:
                 person_name, source_camera, similarity = row
                 return {
@@ -131,11 +135,13 @@ class SimilaritySearch:
                     'source_camera': source_camera,
                     'match_type': 'cosine'
                 }, float(similarity)
-            
+
             return None, 0.0
-            
+
         except Exception as e:
             print(f"[ERROR] Person cosine search failed: {e}")
+            if conn:
+                self.db_manager.return_connection(conn)
             return None, 0.0
     
     def find_person_match_euclidean(self, query_embedding, threshold=0.9):
@@ -162,14 +168,14 @@ class SimilaritySearch:
             
             row = cur.fetchone()
             cur.close()
-            conn.close()
-            
+            self.db_manager.return_connection(conn)
+
             if row:
                 person_name, source_camera, distance = row
-                
+
                 # Better conversion for normalized vectors
                 similarity = max(0.0, 1.0 - (distance / 2.0))
-                
+
                 # Use threshold of 0.6 for this scale (equivalent to 0.8 cosine similarity)
                 if similarity >= 0.6:
                     return {
@@ -181,11 +187,13 @@ class SimilaritySearch:
                     }, float(similarity)
                 else:
                     return None, float(similarity)
-            
+
             return None, 0.0
-            
+
         except Exception as e:
             print(f"[ERROR] Person euclidean search failed: {e}")
+            if conn:
+                self.db_manager.return_connection(conn)
             return None, 0.0
     
     def compare_embeddings_cosine(self, embedding1, embedding2):
@@ -279,12 +287,14 @@ class SimilaritySearch:
             
             results = cur.fetchall()
             cur.close()
-            conn.close()
-            
+            self.db_manager.return_connection(conn)
+
             return results
 
         except Exception as e:
             print(f"[ERROR] Top matches search failed: {e}")
+            if conn:
+                self.db_manager.return_connection(conn)
             return []
 
     def find_solider_match_cosine(self, query_embedding, threshold=0.7):
@@ -312,7 +322,7 @@ class SimilaritySearch:
 
             row = cur.fetchone()
             cur.close()
-            conn.close()
+            self.db_manager.return_connection(conn)
 
             if row:
                 person_name, source_camera, similarity = row
@@ -327,6 +337,8 @@ class SimilaritySearch:
 
         except Exception as e:
             print(f"[ERROR] SOLIDER cosine search failed: {e}")
+            if conn:
+                self.db_manager.return_connection(conn)
             return None, 0.0
 
     def find_transreid_match_cosine(self, query_embedding, threshold=0.7):
@@ -366,11 +378,11 @@ class SimilaritySearch:
             except Exception as query_error:
                 print(f"[ERROR] TransReID: Query failed - {query_error}")
                 cur.close()
-                conn.close()
+                self.db_manager.return_connection(conn)
                 return None, 0.0
 
             cur.close()
-            conn.close()
+            self.db_manager.return_connection(conn)
 
             if row:
                 person_name, source_camera, similarity = row
@@ -394,6 +406,8 @@ class SimilaritySearch:
 
         except Exception as e:
             print(f"[ERROR] TransReID cosine search failed: {e}")
+            if conn:
+                self.db_manager.return_connection(conn)
             import traceback
             traceback.print_exc()
             return None, 0.0
@@ -473,7 +487,7 @@ class SimilaritySearch:
                     part_similarities[face_id].append(float(similarity))
 
             cur.close()
-            conn.close()
+            self.db_manager.return_connection(conn)
 
             if not part_similarities:
                 print("[DEBUG] BPBreID: No matches found for any body part")
@@ -503,15 +517,15 @@ class SimilaritySearch:
                 return None, best_similarity
 
             # Get person name from face_embeddings
-            conn = self.db_manager.get_connection()
-            if not conn:
+            conn2 = self.db_manager.get_connection()
+            if not conn2:
                 return None, 0.0
 
-            cur = conn.cursor()
+            cur = conn2.cursor()
             cur.execute("SELECT person_name FROM face_embeddings WHERE id = %s", (best_face_id,))
             row = cur.fetchone()
             cur.close()
-            conn.close()
+            self.db_manager.return_connection(conn2)
 
             if row:
                 person_name = row[0]
@@ -530,6 +544,8 @@ class SimilaritySearch:
 
         except Exception as e:
             print(f"[ERROR] BPBreID cosine search failed: {e}")
+            if conn:
+                self.db_manager.return_connection(conn)
             import traceback
             traceback.print_exc()
             return None, 0.0

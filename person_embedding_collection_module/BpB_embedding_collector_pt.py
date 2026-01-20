@@ -9,12 +9,18 @@ import os
 import sys
 import torch
 import random
+import pickle
 from enum import Enum
 from dataclasses import dataclass
 from pathlib import Path
 
 # Add parent directory to path to access utils and core modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Redis configuration for embedding communication
+REDIS_HOST = "localhost"
+REDIS_PORT = 6379
+REDIS_EMBEDDING_STREAM = "person_embeddings"
 
 from camera import create_camera_structure, calculate_display_dimensions, create_gstreamer_pipeline
 
@@ -134,6 +140,10 @@ class PersonEmbeddingCollector:
             device="cuda" if torch.cuda.is_available() else "cpu"
         )
 
+        # Initialize Redis client for embedding communication
+        self.redis_client = None
+        self._init_redis_connection()
+
         # Set output directory - use shared location in repo root if not provided
         if output_dir is None:
             # Use repo root for shared access between modules
@@ -238,6 +248,85 @@ class PersonEmbeddingCollector:
 
         print("PersonEmbeddingCollector initialized - GPU models will load in worker thread")
 
+    def _init_redis_connection(self):
+        """Initialize Redis connection for embedding communication."""
+        try:
+            import redis
+            self.redis_client = redis.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                decode_responses=False,  # Keep binary mode for pickle
+                socket_connect_timeout=5,
+                socket_keepalive=True
+            )
+            # Test connection
+            self.redis_client.ping()
+            print(f"[REDIS] Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
+            print(f"[REDIS] Embedding stream: {REDIS_EMBEDDING_STREAM}")
+        except ImportError:
+            print("[REDIS] ERROR: redis-py not installed. Install with: pip install redis")
+            self.redis_client = None
+        except Exception as e:
+            print(f"[REDIS] ERROR: Failed to connect to Redis: {e}")
+            print("[REDIS] Make sure Redis is running: sudo systemctl start redis")
+            self.redis_client = None
+
+    def publish_embeddings_to_redis(self, person_name, embeddings, visibility, pids, face_id):
+        """
+        Publish embeddings to Redis stream for main pipeline consumption.
+
+        Args:
+            person_name (str): Name of the person
+            embeddings (torch.Tensor): Embedding tensor [N, 6, 512]
+            visibility (torch.Tensor): Visibility tensor [N, 6]
+            pids (torch.Tensor): Person IDs tensor [N]
+            face_id (int): Face ID from face_embeddings table
+
+        Returns:
+            bool: True if published successfully, False otherwise
+        """
+        if self.redis_client is None:
+            print(f"[REDIS] No Redis connection, skipping publish for {person_name}")
+            return False
+
+        try:
+            # Move tensors to CPU for serialization
+            embeddings_cpu = embeddings.cpu() if embeddings.is_cuda else embeddings
+            visibility_cpu = visibility.cpu() if visibility.is_cuda else visibility
+            pids_cpu = pids.cpu() if pids.is_cuda else pids
+
+            # Create payload
+            payload = {
+                'person_name': person_name,
+                'face_id': face_id,
+                'embeddings': embeddings_cpu,
+                'visibility': visibility_cpu,
+                'pids': pids_cpu,
+                'timestamp': time.time()
+            }
+
+            # Serialize with pickle
+            serialized_data = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+
+            # Publish to Redis stream
+            self.redis_client.xadd(
+                REDIS_EMBEDDING_STREAM,
+                {'data': serialized_data},
+                maxlen=100,  # Keep last 100 entries
+                approximate=True
+            )
+
+            print(f"[REDIS] Published embeddings for {person_name} (face_id={face_id}) to stream")
+            print(f"[REDIS]   - Embeddings shape: {embeddings_cpu.shape}")
+            print(f"[REDIS]   - Visibility shape: {visibility_cpu.shape}")
+            print(f"[REDIS]   - PIDs: {torch.unique(pids_cpu).tolist()}")
+
+            return True
+
+        except Exception as e:
+            print(f"[REDIS] Error publishing embeddings for {person_name}: {e}")
+            return False
+
     def update_embedding_status(self, person_id, person_name, pt_path, status='READY'):
         """
         Update the embedding_status table in the database.
@@ -329,12 +418,13 @@ class PersonEmbeddingCollector:
             print(f"[PT]   - Visibility shape: {all_visibility.shape}")
             print(f"[PT]   - PIDs shape: {pids.shape}")
 
-            # Update embedding_status table with READY status
-            self.update_embedding_status(
-                person_id=face_id,
+            # Publish embeddings to Redis for immediate consumption by main pipeline
+            self.publish_embeddings_to_redis(
                 person_name=person_name,
-                pt_path=person_dir,
-                status='READY'
+                embeddings=all_embeddings,
+                visibility=all_visibility,
+                pids=pids,
+                face_id=face_id
             )
 
             return True
@@ -1478,6 +1568,14 @@ class PersonEmbeddingCollector:
             self.gpu_worker_thread.join(timeout=3.0)
             if self.gpu_worker_thread.is_alive():
                 print("Warning: GPU worker thread did not finish cleanly")
+
+        # Close Redis connection
+        if self.redis_client is not None:
+            try:
+                self.redis_client.close()
+                print("[REDIS] Connection closed")
+            except Exception as e:
+                print(f"[REDIS] Error closing connection: {e}")
 
         # Stop camera pipelines
         for camera_id in ['center', 'right']:

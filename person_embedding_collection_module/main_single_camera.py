@@ -37,7 +37,7 @@ def create_camera_config():
     # Single camera - for both face recognition and body embedding collection
     camera_config = {
         'name': 'Primary Camera',
-        'url': 'rtsp://admin:admin%40123@192.168.0.110:554/stream1',
+        'url': 'rtsp://admin:admin%40123@192.168.0.106:554/stream1',
         'width': 640,
         'height': 640
     }
