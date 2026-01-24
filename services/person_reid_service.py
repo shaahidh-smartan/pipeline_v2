@@ -117,13 +117,12 @@ class PersonReIDService:
         self.track_voting = {}  # {(camera_id, track_id): {'votes': {}, 'frame_count': 0, 'distances': {}}}
         self.cached_tracks = {}  # {(camera_id, track_id): {'person_id': str, 'distance': float, 'votes': int}}
 
-        # Database embedding polling
+        # Database embedding polling (disabled - using Redis streaming instead)
         self.last_embedding_check = 0
         self.embedding_check_interval = 5  # Check every 5 seconds
 
-        # Load all existing CONSUMED embeddings on startup
-        print("\n[INIT] Loading existing embeddings from database...")
-        self._load_all_consumed_embeddings()
+        # Note: Embeddings are now loaded via Redis streaming (see main1.py)
+        # No need to poll database anymore
 
         # Create tracker arguments
         tracker_args = type('Args', (object,), {
@@ -240,53 +239,6 @@ class PersonReIDService:
         self.gallery_pids = torch.empty(0, dtype=torch.long, device=self.device)
         print("        Initialized empty gallery - will load embeddings dynamically from database")
 
-    def _load_all_consumed_embeddings(self):
-        """Load all CONSUMED embeddings from database on startup."""
-        try:
-            conn = self.db_manager.get_connection()
-            if not conn:
-                print("        No database connection, skipping initial embedding load")
-                return
-
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT person_id, person_name, pt_path, created_at
-                FROM embedding_status
-                WHERE status = 'CONSUMED'
-                ORDER BY created_at ASC
-            """)
-
-            results = cur.fetchall()
-            cur.close()
-            self.db_manager.return_connection(conn)
-
-            if not results:
-                print("        No CONSUMED embeddings found in database")
-                return
-
-            print(f"        Found {len(results)} CONSUMED embedding(s) to load")
-
-            # Load each embedding
-            for row in results:
-                person_id = row[0]
-                person_name = row[1]
-                pt_path = row[2]
-
-                print(f"        Loading {person_name} (person_id={person_id})...")
-
-                embeddings, visibility, pids = self.load_person_embeddings(pt_path)
-
-                if embeddings is not None:
-                    self.add_to_gallery(embeddings, visibility, pids)
-                else:
-                    print(f"        ✗ Failed to load embeddings for {person_name}")
-
-            print(f"        ✓ Loaded {len(results)} person embeddings into gallery\n")
-
-        except Exception as e:
-            print(f"[ERROR] Failed to load consumed embeddings: {e}")
-            import traceback
-            traceback.print_exc()
 
     def initialize_database_connection(self):
         """
@@ -312,39 +264,6 @@ class PersonReIDService:
             print(f"Database initialization failed: {e}")
             raise
 
-    def check_for_new_embeddings(self):
-        """Check embedding_status table for new READY embeddings."""
-        try:
-            conn = self.db_manager.get_connection()
-            if not conn:
-                return []
-
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT person_id, person_name, pt_path, created_at
-                FROM embedding_status
-                WHERE status = 'READY'
-                ORDER BY created_at ASC
-            """)
-
-            results = cur.fetchall()
-            cur.close()
-            self.db_manager.return_connection(conn)
-
-            new_embeddings = []
-            for row in results:
-                new_embeddings.append({
-                    'person_id': row[0],
-                    'person_name': row[1],
-                    'pt_path': row[2],
-                    'created_at': row[3]
-                })
-
-            return new_embeddings
-
-        except Exception as e:
-            print(f"[DB_ERROR] Failed to check for new embeddings: {e}")
-            return []
 
     def load_person_embeddings(self, pt_path):
         """Load person embeddings from .pt files."""
@@ -371,32 +290,6 @@ class PersonReIDService:
             print(f"[LOAD_ERROR] Failed to load embeddings from {pt_path}: {e}")
             return None, None, None
 
-    def update_embedding_status(self, person_id, status='CONSUMED'):
-        """Update embedding status in database."""
-        try:
-            current_timestamp = int(time.time() * 1000)  # milliseconds
-
-            conn = self.db_manager.get_connection()
-            if not conn:
-                return False
-
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE embedding_status
-                SET status = %s, updated_at = %s
-                WHERE person_id = %s
-            """, (status, current_timestamp, person_id))
-
-            conn.commit()
-            cur.close()
-            self.db_manager.return_connection(conn)
-
-            print(f"[DB] Updated person_id={person_id} to status={status}")
-            return True
-
-        except Exception as e:
-            print(f"[DB_ERROR] Failed to update embedding status: {e}")
-            return False
 
     def add_to_gallery(self, embeddings, visibility, pids):
         """Add new embeddings to the gallery dynamically."""
@@ -417,43 +310,13 @@ class PersonReIDService:
             return False
 
     def poll_and_load_new_embeddings(self):
-        """Poll database for new embeddings and load them into gallery."""
-        current_time = time.time()
+        """
+        Poll database for new embeddings and load them into gallery.
 
-        # Only check at intervals
-        if current_time - self.last_embedding_check < self.embedding_check_interval:
-            return
-
-        self.last_embedding_check = current_time
-
-        # Check for new embeddings
-        new_embeddings = self.check_for_new_embeddings()
-
-        if not new_embeddings:
-            return
-
-        print(f"\n[POLL] Found {len(new_embeddings)} new embedding(s) with READY status")
-
-        # Load and add each new embedding
-        for emb_info in new_embeddings:
-            person_id = emb_info['person_id']
-            person_name = emb_info['person_name']
-            pt_path = emb_info['pt_path']
-
-            print(f"[POLL] Loading embeddings for {person_name} (person_id={person_id})...")
-
-            embeddings, visibility, pids = self.load_person_embeddings(pt_path)
-
-            if embeddings is not None:
-                # Add to gallery
-                if self.add_to_gallery(embeddings, visibility, pids):
-                    # Mark as consumed
-                    self.update_embedding_status(person_id, status='CONSUMED')
-                    print(f"[POLL] ✓ Successfully loaded and marked {person_name} as CONSUMED\n")
-                else:
-                    print(f"[POLL] ✗ Failed to add {person_name} to gallery\n")
-            else:
-                print(f"[POLL] ✗ Failed to load embeddings for {person_name}\n")
+        NOTE: This method is deprecated. Embeddings are now loaded via Redis streaming.
+        See main1.py's override and _embedding_consumer_loop for the new implementation.
+        """
+        pass  # No-op: Embeddings loaded via Redis streaming instead
 
     def extract_test_embeddings(self, model_output):
         """Extract embeddings from BPBreID model output."""

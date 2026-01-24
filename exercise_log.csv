@@ -1,1 +1,6 @@
 timestamp,camera_id,track_id,exercise,exercise_conf,reps,rep_conf,frame_count,voting_cycle_id,vote_counts,batches_used,batch_ids,global_counters,entry_index,weight,weight_conf
+2026-01-24 18:34:30.796728,cam_1,1,db_seated_arnoldpress,0.976,2,0.666,192,cam_1_1_1769259870,"{'seated_db_low to high_fly': 1, 'db_seated_arnoldpress': 2}",3,"[3, 4, 5]","[3, 4, 5]",0,unknown,0.000
+2026-01-24 18:34:38.467278,cam_1,1,db_seated_arnoldpress,0.976,2,0.986,192,cam_1_1_1769259878,{'db_seated_arnoldpress': 3},3,"[6, 7, 0]","[6, 7, 8]",1,unknown,0.000
+2026-01-24 18:34:46.163704,cam_1,1,db_seated_arnoldpress,0.810,3,0.728,192,cam_1_1_1769259886,{'db_seated_arnoldpress': 3},3,"[1, 2, 3]","[9, 10, 11]",2,unknown,0.000
+2026-01-24 18:34:58.930925,cam_1,1,front_raise,0.815,5,0.968,192,cam_1_1_1769259898,"{'db_upright_rows': 1, 'front_raise': 2}",3,"[6, 7, 0]","[14, 15, 16]",3,unknown,0.000
+2026-01-24 18:35:06.613124,cam_1,1,db_rows,0.957,4,0.774,192,cam_1_1_1769259906,"{'front_raise': 1, 'db_rows': 2}",3,"[1, 2, 3]","[17, 18, 19]",4,unknown,0.000

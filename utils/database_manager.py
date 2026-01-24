@@ -311,13 +311,26 @@ class DatabaseManager:
 
             cur = conn.cursor()
 
-            # Parse timestamp if it's a string
+            # Parse timestamp and convert to bigint (Unix timestamp in milliseconds)
             timestamp = exercise_data['timestamp']
             if isinstance(timestamp, str):
                 # Handle the %f literal in timestamp
                 if '.%f' in timestamp:
                     timestamp = timestamp.replace('.%f', '.000000')
-                timestamp = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S.%f")
+                # Parse ISO format or standard format
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                except:
+                    dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S.%f")
+                # Convert to Unix timestamp in milliseconds
+                timestamp = int(dt.timestamp() * 1000)
+            elif isinstance(timestamp, datetime):
+                # Convert datetime to Unix timestamp in milliseconds
+                timestamp = int(timestamp.timestamp() * 1000)
+            # If already an int, assume it's already a Unix timestamp
+            elif not isinstance(timestamp, int):
+                # Fallback: use current time
+                timestamp = int(time.time() * 1000)
 
             # Convert data to JSON - FIXED to handle global_counters properly
             vote_counts_json = json.dumps(exercise_data['vote_counts'])
@@ -338,8 +351,8 @@ class DatabaseManager:
                 INSERT INTO exercise_logs (
                     timestamp, camera_id, track_id, exercise, exercise_conf,
                     reps, rep_conf, frame_count, voting_cycle_id, vote_counts,
-                    batches_used, batch_ids, global_counters, entry_index, weight, weight_conf
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    batches_used, batch_ids, global_counters, entry_index
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 timestamp,
                 exercise_data['camera_id'],
@@ -353,10 +366,8 @@ class DatabaseManager:
                 vote_counts_json,
                 exercise_data['batches_used'],
                 batch_ids_json,
-                global_counters_json,  # Fixed: Now properly converted to JSON
-                exercise_data['entry_index'],
-                exercise_data.get('weight', 'unknown'),
-                exercise_data.get('weight_conf', 0.0)
+                global_counters_json,
+                exercise_data['entry_index']
             ))
 
             conn.commit()
@@ -525,7 +536,7 @@ class DatabaseManager:
             cur.execute("""
                 INSERT INTO person_reid_mapped (person_name, camera_id, track_id, global_id)
                 VALUES (%s, %s, %s, %s)
-                ON CONFLICT (person_name, camera_id, track_id, detection_timestamp) DO NOTHING
+                ON CONFLICT (person_name, camera_id, track_id) DO NOTHING
             """, (person_name, camera_id, track_id, global_id))
 
             conn.commit()
