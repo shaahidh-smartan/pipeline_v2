@@ -71,13 +71,41 @@ def ious(atlbrs, btlbrs):
     return ious
 
 
+def center_distance(atracks, btracks, gate=200.0):
+    """
+    Compute cost based on center-point Euclidean distance, normalized to [0,1].
+    Detections within `gate` pixels get cost < 1; beyond that cost = 1.
+    """
+    if len(atracks) == 0 or len(btracks) == 0:
+        return np.empty((len(atracks), len(btracks)), dtype=np.float64)
+
+    if isinstance(atracks[0], np.ndarray):
+        atlbrs = np.array(atracks)
+    else:
+        atlbrs = np.array([track.tlbr for track in atracks])
+
+    if isinstance(btracks[0], np.ndarray):
+        btlbrs = np.array(btracks)
+    else:
+        btlbrs = np.array([track.tlbr for track in btracks])
+
+    # Center points: (x1+x2)/2, (y1+y2)/2
+    a_centers = np.stack([(atlbrs[:, 0] + atlbrs[:, 2]) / 2,
+                          (atlbrs[:, 1] + atlbrs[:, 3]) / 2], axis=1)
+    b_centers = np.stack([(btlbrs[:, 0] + btlbrs[:, 2]) / 2,
+                          (btlbrs[:, 1] + btlbrs[:, 3]) / 2], axis=1)
+
+    dists = cdist(a_centers, b_centers, metric='euclidean')
+    # Normalize: 0 distance -> 0 cost, gate distance -> 1 cost
+    cost_matrix = np.minimum(dists / gate, 1.0)
+    return cost_matrix
+
+
 def iou_distance(atracks, btracks):
     """
-    Compute cost based on IoU
-    :type atracks: list[STrack]
-    :type btracks: list[STrack]
-
-    :rtype cost_matrix np.ndarray
+    Compute cost based on IoU with center-distance fallback.
+    When IoU is low (e.g. person leaning changes bbox shape),
+    center proximity still keeps the track associated.
     """
 
     if (len(atracks)>0 and isinstance(atracks[0], np.ndarray)) or (len(btracks) > 0 and isinstance(btracks[0], np.ndarray)):
@@ -87,7 +115,15 @@ def iou_distance(atracks, btracks):
         atlbrs = [track.tlbr for track in atracks]
         btlbrs = [track.tlbr for track in btracks]
     _ious = ious(atlbrs, btlbrs)
-    cost_matrix = 1 - _ious
+    iou_cost = 1 - _ious
+
+    # Blend with center distance: use 70% IoU + 30% center distance
+    # This prevents track loss when aspect ratio changes drastically
+    c_cost = center_distance(atracks, btracks, gate=200.0)
+    if c_cost.size > 0:
+        cost_matrix = 0.7 * iou_cost + 0.3 * c_cost
+    else:
+        cost_matrix = iou_cost
 
     return cost_matrix
 

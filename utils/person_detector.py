@@ -7,12 +7,10 @@ import threading
 class PersonDetector:
     """Thread-safe YOLO-based person detection utility."""
     
-    def __init__(self, model_name='yolov8n.pt', confidence_threshold=0.3):
+    def __init__(self, model_name='yolo11m-pose.pt', confidence_threshold=0.3):
         self.confidence_threshold = confidence_threshold
         
-        print("Loading YOLO model...")
         self.model = YOLO(model_name)
-        print("YOLO model loaded successfully")
         
         # Configure thread safety for YOLO
         if hasattr(self.model, 'model') and hasattr(self.model.model, 'eval'):
@@ -31,15 +29,13 @@ class PersonDetector:
         else:
             self.device = 'cpu'
         
-        print(f"[INFO] PersonDetector using device: {self.device}")
-        print(f"[INFO] Thread-safe inference enabled with deterministic mode")
     
     def detect_persons(self, frame):
         """
         Detect persons in frame using YOLO with thread-safe inference.
 
         Returns:
-            person_boxes: List of dict with bbox and confidence
+            person_boxes: List of dict with bbox, confidence, and keypoints
             person_boxes_track: List for tracking [x1, y1, x2, y2, confidence]
         """
         try:
@@ -48,9 +44,9 @@ class PersonDetector:
                 # Ensure CUDA synchronization before inference
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
-                
+
                 results = self.model(frame, verbose=False)
-                
+
                 # Ensure CUDA synchronization after inference
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
@@ -63,7 +59,12 @@ class PersonDetector:
                 if boxes is None or len(boxes) == 0:
                     continue
 
-                for box in boxes:
+                # Extract keypoints if available (YOLO pose model)
+                keypoints_data = None
+                if hasattr(result, 'keypoints') and result.keypoints is not None:
+                    keypoints_data = result.keypoints
+
+                for i, box in enumerate(boxes):
                     # Ensure cls and conf exist and are indexable
                     if box.cls is None or box.conf is None:
                         continue
@@ -79,16 +80,24 @@ class PersonDetector:
                         xyxy = box.xyxy[0] if box.xyxy.ndim > 1 else box.xyxy
                         x1, y1, x2, y2 = xyxy.cpu().numpy()
 
+                        # Extract keypoints for this person [17, 3] -> (x, y, conf)
+                        kps = None
+                        if keypoints_data is not None:
+                            try:
+                                kps = keypoints_data.data[i].cpu().numpy()  # [17, 3]
+                            except (IndexError, AttributeError):
+                                kps = None
+
                         person_boxes.append({
                             'bbox': [int(x1), int(y1), int(x2), int(y2)],
-                            'confidence': conf_val
+                            'confidence': conf_val,
+                            'keypoints': kps
                         })
                         person_boxes_track.append([int(x1), int(y1), int(x2), int(y2), conf_val])
 
             return person_boxes, person_boxes_track
 
         except Exception as e:
-            print(f"[ERROR] YOLO person detection failed: {e}")
             return [], []
 
     
@@ -124,7 +133,6 @@ class PersonDetector:
             return person_boxes, person_boxes_track
             
         except Exception as e:
-            print(f"Error in YOLOv5 person detection: {e}")
             return [], []
     
     def filter_person_detections(self, person_boxes_track, min_area=100, max_aspect_ratio=2.0):
@@ -168,5 +176,4 @@ class PersonDetector:
             return person_crop
             
         except Exception as e:
-            print(f"Error extracting person crop: {e}")
             return None

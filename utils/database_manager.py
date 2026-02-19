@@ -532,11 +532,10 @@ class DatabaseManager:
 
             cur = conn.cursor()
 
-            # Insert with global_id directly (avoiding trigger function)
+            # Insert person reid log (duplicates prevented by logged_tracks in service layer)
             cur.execute("""
                 INSERT INTO person_reid_mapped (person_name, camera_id, track_id, global_id)
                 VALUES (%s, %s, %s, %s)
-                ON CONFLICT (person_name, camera_id, track_id) DO NOTHING
             """, (person_name, camera_id, track_id, global_id))
 
             conn.commit()

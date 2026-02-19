@@ -1,6 +1,24 @@
 timestamp,camera_id,track_id,exercise,exercise_conf,reps,rep_conf,frame_count,voting_cycle_id,vote_counts,batches_used,batch_ids,global_counters,entry_index,weight,weight_conf
-2026-01-24 18:34:30.796728,cam_1,1,db_seated_arnoldpress,0.976,2,0.666,192,cam_1_1_1769259870,"{'seated_db_low to high_fly': 1, 'db_seated_arnoldpress': 2}",3,"[3, 4, 5]","[3, 4, 5]",0,unknown,0.000
-2026-01-24 18:34:38.467278,cam_1,1,db_seated_arnoldpress,0.976,2,0.986,192,cam_1_1_1769259878,{'db_seated_arnoldpress': 3},3,"[6, 7, 0]","[6, 7, 8]",1,unknown,0.000
-2026-01-24 18:34:46.163704,cam_1,1,db_seated_arnoldpress,0.810,3,0.728,192,cam_1_1_1769259886,{'db_seated_arnoldpress': 3},3,"[1, 2, 3]","[9, 10, 11]",2,unknown,0.000
-2026-01-24 18:34:58.930925,cam_1,1,front_raise,0.815,5,0.968,192,cam_1_1_1769259898,"{'db_upright_rows': 1, 'front_raise': 2}",3,"[6, 7, 0]","[14, 15, 16]",3,unknown,0.000
-2026-01-24 18:35:06.613124,cam_1,1,db_rows,0.957,4,0.774,192,cam_1_1_1769259906,"{'front_raise': 1, 'db_rows': 2}",3,"[1, 2, 3]","[17, 18, 19]",4,unknown,0.000
+2026-02-19 17:34:38.806209,cam_1,2,plank_lying,0.519,3,0.455,192,cam_1_2_1771502678,{'plank_lying': 3},3,"[0, 2, 6]","[0, 2, 6]",0,unknown,0.000
+2026-02-19 17:35:20.370352,cam_1,15,kb_clean and press,0.580,,0.337,192,cam_1_15_1771502720,"{'hammer_curls': 1, 'kb_clean and press': 2}",3,"[0, 1, 2]","[0, 1, 2]",0,unknown,0.000
+2026-02-19 17:35:28.028340,cam_1,15,kb_clean and press,0.453,,0.332,192,cam_1_15_1771502727,"{'kb_clean and press': 2, 'hammer_curls': 1}",3,"[3, 4, 5]","[3, 4, 5]",1,unknown,0.000
+2026-02-19 17:35:45.926680,cam_1,15,kb_shrugs,0.441,,0.382,192,cam_1_15_1771502745,"{'kb_shrugs': 2, 'hammer_curls': 1}",3,"[2, 3, 4]","[10, 11, 12]",2,unknown,0.000
+2026-02-19 17:36:06.274719,cam_1,15,db_incline_chest_press,0.487,,0.346,192,cam_1_15_1771502766,"{'db_incline_chest_press': 2, 'db_hip_thrust': 1}",3,"[2, 3, 4]","[18, 19, 20]",3,unknown,0.000
+2026-02-19 17:36:13.951531,cam_1,15,db_incline_chest_press,0.711,3,0.611,192,cam_1_15_1771502773,"{'db_hip_thrust': 1, 'db_incline_chest_press': 2}",3,"[5, 6, 7]","[21, 22, 23]",4,unknown,0.000
+2026-02-19 17:36:26.681272,cam_1,21,db_incline_chest_press,0.635,5,0.824,192,cam_1_21_1771502786,{'db_incline_chest_press': 3},3,"[0, 1, 2]","[0, 1, 2]",0,unknown,0.000
+2026-02-19 17:36:40.947199,cam_1,26,hammer_curls,0.608,,0.371,192,cam_1_26_1771502800,"{'hammer_curls': 2, 'tricep_dips': 1}",3,"[1, 3, 4]","[1, 3, 4]",0,unknown,0.000
+2026-02-19 17:37:05.030549,cam_1,31,db_chest_press,0.542,4,0.710,192,cam_1_31_1771502824,"{'db_hip_thrust': 1, 'db_chest_press': 2}",3,"[0, 2, 3]","[0, 2, 3]",0,unknown,0.000
+2026-02-19 17:37:12.686794,cam_1,31,db_incline_chest_press,0.460,6,0.973,192,cam_1_31_1771502832,"{'db_chest_press': 1, 'db_incline_chest_press': 2}",3,"[4, 5, 6]","[4, 5, 6]",1,unknown,0.000
+2026-02-19 17:37:20.358579,cam_1,31,db_incline_chest_press,0.716,5,0.908,192,cam_1_31_1771502840,{'db_incline_chest_press': 3},3,"[7, 0, 1]","[7, 8, 9]",2,unknown,0.000
+2026-02-19 17:37:30.612007,cam_1,31,db_incline_chest_press,0.656,,0.362,192,cam_1_31_1771502850,{'db_incline_chest_press': 3},3,"[2, 3, 4]","[10, 11, 12]",3,unknown,0.000
+2026-02-19 17:37:38.209299,cam_1,31,db_incline_chest_press,0.769,5,0.945,192,cam_1_31_1771502858,{'db_incline_chest_press': 3},3,"[5, 6, 7]","[13, 14, 15]",4,unknown,0.000
+2026-02-19 17:37:45.887144,cam_1,31,db_incline_chest_press,0.584,6,0.826,192,cam_1_31_1771502865,{'db_incline_chest_press': 3},3,"[0, 1, 2]","[16, 17, 18]",5,unknown,0.000
+2026-02-19 17:37:53.557718,cam_1,31,db_incline_chest_press,0.590,,0.352,192,cam_1_31_1771502873,"{'db_incline_chest_press': 2, 'db_hip_thrust': 1}",3,"[3, 4, 5]","[19, 20, 21]",6,unknown,0.000
+2026-02-19 17:38:01.257109,cam_1,31,db_hip_thrust,0.927,1,0.345,192,cam_1_31_1771502881,{'db_hip_thrust': 3},3,"[6, 7, 0]","[22, 23, 24]",7,unknown,0.000
+2026-02-19 17:38:31.825269,cam_1,46,tricep_dips,0.762,4,0.639,192,cam_1_46_1771502911,"{'renegade_rows_db': 1, 'tricep_dips': 2}",3,"[1, 2, 3]","[1, 2, 3]",0,unknown,0.000
+2026-02-19 17:38:39.584133,cam_1,46,plank_lying,0.972,1,0.404,192,cam_1_46_1771502919,"{'tricep_dips': 1, 'plank_lying': 2}",3,"[4, 5, 6]","[4, 5, 6]",1,unknown,0.000
+2026-02-19 17:38:47.182196,cam_1,46,plank_lying,0.925,,0.218,192,cam_1_46_1771502927,"{'plank_lying': 2, 'renegade_rows_db': 1}",3,"[7, 0, 1]","[7, 8, 9]",2,unknown,0.000
+2026-02-19 17:39:12.120920,cam_1,77,superman_lying,0.670,,0.382,192,cam_1_77_1771502952,"{'superman_lying': 2, 'plank_lying': 1}",3,"[0, 1, 2]","[0, 1, 2]",0,unknown,0.000
+2026-02-19 17:39:30.650253,cam_1,85,tricep_dips,0.774,3,0.508,192,cam_1_85_1771502970,"{'tricep_dips': 2, 'plank_lying': 1}",3,"[0, 1, 2]","[0, 1, 2]",0,unknown,0.000
+2026-02-19 17:39:38.320587,cam_1,85,plank_lying,0.945,,0.169,192,cam_1_85_1771502978,"{'plank_lying': 2, 'renegade_rows_db': 1}",3,"[3, 4, 5]","[3, 4, 5]",1,unknown,0.000
+2026-02-19 17:39:45.988418,cam_1,85,plank_lying,0.824,,0.416,192,cam_1_85_1771502985,{'plank_lying': 3},3,"[6, 7, 0]","[6, 7, 8]",2,unknown,0.000

@@ -118,8 +118,6 @@ class GlobalExerciseTracker:
             self._master_exercise_list[key].append(exercise_entry)
             self.total_exercises_added += 1
             entry_index = len(self._master_exercise_list[key]) - 1
-            print(f"[MASTER_LIST] Added {cam_id}:{track_id} #{entry_index}: {exercise_entry.exercise} "
-                  f"({exercise_entry.confidence:.3f}) - {len(exercise_entry.frames)} frames")
             
     def get_entry_for_repnet(self, cam_id: str, track_id: int) -> Optional[Tuple[ExerciseEntry, int]]:
         """
@@ -142,7 +140,6 @@ class GlobalExerciseTracker:
                 entry = exercise_list[i]
                 if not entry.processed_by_repnet:
                     self._repnet_sent_index[key] = i
-                    print(f"[REPNET_SEND] {cam_id}:{track_id} - Sending exercise #{i}: {entry.exercise} to RepNet")
                     return entry, i
             return None
 
@@ -171,8 +168,6 @@ class GlobalExerciseTracker:
                 entry.rep_conf = rep_conf
                 entry.repnet_stride = stride
                 self.total_repnet_processed += 1
-                print(f"[REPNET_DONE] {cam_id}:{track_id} #{entry_index}: "
-                    f"{entry.exercise} -> {reps} reps (conf: {rep_conf:.3f})")
 
     def get_track_history(self, cam_id: str, track_id: int) -> List[ExerciseEntry]:
         """
@@ -335,12 +330,9 @@ class BridgeReIDService(PersonReIDService):
             if all(os.path.exists(f) for f in required_files):
                 from services.weight_recognition_module import WeightRecognitionEngine
                 self.weight_engine = WeightRecognitionEngine()
-                print("[WEIGHT] Weight recognition engine initialized")
             else:
-                print("[WEIGHT] Weight model files not found, skipping weight detection")
                 self.weight_engine = None
         except Exception as e:
-            print(f"[WEIGHT] Failed to initialize weight engine: {e}")
             self.weight_engine = None
 
     def compute_iou(self, box1, box2):
@@ -481,10 +473,10 @@ class BridgeReIDService(PersonReIDService):
             
             success = self.db_manager.insert_exercise_log(exercise_data)
             if success:
-                print(f"[DB] Inserted exercise log: {cam_id}:{track_id} - {entry.exercise} (reps: {entry.reps})")
+                pass
                 
         except Exception as db_error:
-            print(f"[DB_ERROR] Exercise database logging failed: {db_error}")
+            pass
 
     def poll_and_load_new_embeddings(self):
         """
@@ -593,7 +585,7 @@ class BridgeReIDService(PersonReIDService):
                                 
                                 weight_success = self.db_manager.insert_weight_detection(weight_data)
                                 if weight_success:
-                                    print(f"[DB_WEIGHT] {camera_id}:{track_id} -> {label} (conf: {conf:.3f})")
+                                    pass
                                 
                                 # CSV backup
                                 with open(self.weight_csvpath, "a", newline="") as f:
@@ -607,7 +599,6 @@ class BridgeReIDService(PersonReIDService):
                                         break
                         
             except Exception as e:
-                print(f"[WEIGHT] Detection failed: {e}")
                 self.last_weight_detections[camera_id] = []
         else:
             weight_detections = self.last_weight_detections.get(camera_id, [])
@@ -726,7 +717,7 @@ class BridgeReIDService(PersonReIDService):
             self.process_pending_repnet_entries()
                         
         except Exception as e:
-            print(f"[VOTING_ERROR] Error processing voting results: {e}")
+            pass
 
     def process_pending_repnet_entries(self):
         """
@@ -784,7 +775,7 @@ class BridgeReIDService(PersonReIDService):
             self.log_to_csv(updated_entry, cam_id, track_id, entry_index)
             
         except Exception as e:
-            print(f"[REPNET_ERROR] {cam_id}:{track_id} - {e}")
+            pass
 
     def _init_redis_connection(self):
         """Initialize Redis connection for SMPL communication."""
@@ -799,14 +790,9 @@ class BridgeReIDService(PersonReIDService):
             )
             # Test connection
             self.redis_client.ping()
-            print(f"[REDIS] ✓ Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
-            print(f"[REDIS] Stream: {REDIS_STREAM} (max queue: {REDIS_MAX_QUEUE_LEN})")
         except ImportError:
-            print("[REDIS] ERROR: redis-py not installed. Install with: pip install redis")
             self.redis_client = None
         except Exception as e:
-            print(f"[REDIS] ERROR: Failed to connect to Redis: {e}")
-            print("[REDIS] Make sure Redis is running: sudo systemctl start redis")
             self.redis_client = None
 
     def _start_embedding_consumer(self):
@@ -817,7 +803,6 @@ class BridgeReIDService(PersonReIDService):
             daemon=True
         )
         self.embedding_consumer_thread.start()
-        print(f"[REDIS] ✓ Embedding consumer started on stream: {REDIS_EMBEDDING_STREAM}")
 
     def _embedding_consumer_loop(self):
         """
@@ -864,7 +849,6 @@ class BridgeReIDService(PersonReIDService):
                             pids = payload.get('pids')
 
                             if embeddings is None or visibility is None or pids is None:
-                                print(f"[REDIS_CONSUMER] Invalid payload for {person_name}")
                                 continue
 
                             # Move tensors to device
@@ -876,23 +860,22 @@ class BridgeReIDService(PersonReIDService):
                             success = self.add_to_gallery(embeddings, visibility, pids)
 
                             if success:
-                                print(f"[REDIS_CONSUMER] ✓ Loaded embeddings for {person_name} (face_id={face_id})")
-                                print(f"[REDIS_CONSUMER]   - Shape: {embeddings.shape}")
-                                print(f"[REDIS_CONSUMER]   - Gallery size: {self.gallery_embeddings.shape[0]} samples")
+                                # Store mapping from numeric PID to person display name
+                                numeric_pid = int(pids[0].item())
+                                self.pid_to_user_id[numeric_pid] = person_name if person_name else face_id
+
                             else:
-                                print(f"[REDIS_CONSUMER] ✗ Failed to add {person_name} to gallery")
+                                pass
 
                         except Exception as e:
-                            print(f"[REDIS_CONSUMER] Error processing message: {e}")
+                            pass
 
                         # Update last_id to acknowledge this message
                         last_id = message_id.decode() if isinstance(message_id, bytes) else message_id
 
             except Exception as e:
-                print(f"[REDIS_CONSUMER] Consumer error: {e}")
                 time.sleep(1)  # Brief pause before retrying
 
-        print("[REDIS_CONSUMER] Consumer thread stopped")
 
     def _stop_embedding_consumer(self):
         """Stop the Redis embedding consumer thread."""
@@ -900,9 +883,9 @@ class BridgeReIDService(PersonReIDService):
         if self.embedding_consumer_thread and self.embedding_consumer_thread.is_alive():
             self.embedding_consumer_thread.join(timeout=3.0)
             if self.embedding_consumer_thread.is_alive():
-                print("[REDIS_CONSUMER] Warning: Consumer thread did not stop cleanly")
+                pass
             else:
-                print("[REDIS_CONSUMER] Consumer thread stopped")
+                pass
 
     def buffer_frame_for_smpl(self, frame, reid_result, camera_id, track_id):
         """
@@ -994,16 +977,12 @@ class BridgeReIDService(PersonReIDService):
         if not all_frames:
             # Debug: show what we have in the buffer
             available_counters = list(self.smpl_global_frame_buffer[key].keys())
-            print(f"[SMPL] No frames found for {cam_id}:{track_id} global_counters={global_counters}")
-            print(f"[SMPL_DEBUG] Available counters in buffer: {available_counters}")
-            print(f"[SMPL_DEBUG] Current window counter: {self.smpl_track_window_counter.get(key, 'N/A')}")
             return 0
 
         # Frames are already sampled (every 5th) during buffering
         # 3 windows x 64 frames / 5 = ~39 frames total
         sampled_frames = all_frames
 
-        print(f"[SMPL] {cam_id}:{track_id} - Sending {len(sampled_frames)} frames for {exercise_name}")
 
         # Use Redis pipeline for efficient batch sending (much faster than individual xadd calls)
         try:
@@ -1057,7 +1036,6 @@ class BridgeReIDService(PersonReIDService):
             pipe.execute()
 
         except Exception as e:
-            print(f"[SMPL] Error sending batch to Redis: {e}")
             frames_sent = 0
 
         # Mark this voting cycle as sent
@@ -1070,7 +1048,6 @@ class BridgeReIDService(PersonReIDService):
             for vc in old_cycles:
                 self.smpl_sent_for_voting_cycle.discard(vc)
 
-        print(f"[SMPL] Successfully sent {frames_sent}/{len(sampled_frames)} frames to Redis")
         return frames_sent
 
     # ==========================================
@@ -1312,9 +1289,8 @@ class BridgeReIDService(PersonReIDService):
         if USE_REDIS and self.redis_client is not None:
             try:
                 self.redis_client.close()
-                print("[REDIS] Connection closed")
             except Exception as e:
-                print(f"[REDIS] Error closing connection: {e}")
+                pass
 
         # Clear SMPL buffers
         self.smpl_global_frame_buffer.clear()
@@ -1357,10 +1333,8 @@ def check_database_connection():
         
         connected, message = db_manager.test_connection()
         if not connected:
-            print(f"[ERROR] Database connection failed: {message}")
             return False
         
-        print(f"[SUCCESS] {message}")
         
         # Create exercise_logs table (legacy support)
         db_manager.create_exercise_logs_table()
@@ -1368,22 +1342,19 @@ def check_database_connection():
         stats = db_manager.get_database_stats()
         
         if stats['person_embeddings'] == 0:
-            print("WARNING: No person embeddings found in database!")
             if os.getenv('HEADLESS'):
-                print("Running in headless mode, continuing without embeddings...")
                 return True
             else:
                 response = input("Continue anyway? (y/n): ").lower()
                 if response != 'y':
                     return False
         else:
-            print(f"Found {stats['person_people']} people with {stats['person_embeddings']} body embeddings")
+            pass
         
         database_checked = True
         return True
         
     except Exception as e:
-        print(f"Database check failed: {e}")
         return False
     
 
@@ -1427,7 +1398,6 @@ def main():
 ]
     
     if not os.path.exists(weights_path):
-        print(f"ERROR: Custom weights file not found: {weights_path}")
         return 1
 
     sf = MViTEngine(
@@ -1443,14 +1413,11 @@ def main():
         confidence_threshold=0.3,  
     )
 
-    print("Starting MViT engine...")
     sf.start()
     time.sleep(5)
     init_stats = sf.get_stats()
     if not init_stats.get('model_loaded', False):
-        print("ERROR: MViT model failed to load!")
         return 1
-    print("SUCCESS: MViT model loaded!")
 
     # RepNet config
     repnet_weights_path = "models/repnet.pth"
@@ -1462,9 +1429,8 @@ def main():
             default_stride=3,
             input_size=112,  
         )
-        print("SUCCESS: RepNet model loaded!")
     
-    DEFAULT_CAMERA_IPS = ["192.168.0.216"]
+    DEFAULT_CAMERA_IPS = ["192.168.0.130"]
 
     if not check_database_connection():
         return 1
@@ -1472,9 +1438,8 @@ def main():
     camera_ips = sys.argv[1:] if len(sys.argv) > 1 else DEFAULT_CAMERA_IPS
     camera_configs = create_camera_configs_from_ips(camera_ips)
 
-    print(f"Using {len(camera_configs)} cameras:")
     for i, cfg in enumerate(camera_configs, 1):
-        print(f"  {i}: {cfg['name']} - {cfg['url']}")
+        pass
 
     # BPBReID configuration
     BPBREID_CONFIG_PATH = "configs/test_reid.yaml"
@@ -1503,23 +1468,19 @@ def main():
     )
 
     def _shutdown(*_):
-        print("Shutting down...")
         try:
             reid.stop_system()
         except Exception as e:
-            print(f"Error stopping ReID system: {e}")
+            pass
         sf.stop()
-        print("System stopped")
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
     try:
-        print("Starting person ReID system")
         reid.start_person_reid_system()
         return 0
     except Exception as e:
-        print(f"Error starting ReID system: {e}")
         return 1
     finally:
         sf.stop()

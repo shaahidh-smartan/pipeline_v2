@@ -55,7 +55,7 @@ class PersonReIDService:
     """
     
     def __init__(self, stream_configs, config_path, weights_path, gallery_dir=None,
-                 voting_threshold=4.5, voting_window=30, min_votes=15,
+                 voting_threshold=4.5, voting_window=20, min_votes=10,
                  matching_threshold=6.0, device='cuda'):
         """
         Initialize Dynamic Camera Person ReID Service with BPBreID.
@@ -99,18 +99,14 @@ class PersonReIDService:
             f.write(f"PERSON RE-ID LOG - Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("="*80 + "\n\n")
 
-        print(f"Log file created: {self.master_list_log_file}")
         self.logged_tracks = set()
 
         # Initialize utility modules
-        print("Initializing database manager...")
         self.db_manager = DatabaseManager()
 
-        print("Initializing person detector...")
         self.person_detector = PersonDetector()
 
         # Initialize BPBreID model
-        print("\n[INIT] Loading BPBreID model...")
         self._initialize_reid(config_path, weights_path, gallery_dir, device)
 
         # Voting-based cache structures (replacing old cache)
@@ -127,8 +123,8 @@ class PersonReIDService:
         # Create tracker arguments
         tracker_args = type('Args', (object,), {
             'track_thresh': 0.5,
-            'match_thresh': 0.8,
-            'buffer_size': 30,
+            'match_thresh': 0.5,
+            'buffer_size': 480,
             'mot20': False,
             'aspect_ratio_thresh': 1.6,
             'min_box_area': 10,
@@ -212,7 +208,6 @@ class PersonReIDService:
         self.device = self.extractor.device
 
         # Load gallery (optional - can start with empty gallery)
-        print("\n[INIT] Loading gallery...")
         if gallery_dir and Path(gallery_dir).exists():
             gallery_path = Path(gallery_dir)
             embeddings_file = gallery_path / 'gallery_embeddings.pt'
@@ -221,13 +216,9 @@ class PersonReIDService:
                 self.gallery_embeddings = torch.load(embeddings_file, map_location=self.device)
                 self.gallery_visibility = torch.load(gallery_path / 'gallery_visibility.pt', map_location=self.device)
                 self.gallery_pids = torch.load(gallery_path / 'gallery_pids.pt', map_location=self.device)
-                print(f"        Gallery: {self.gallery_embeddings.shape[0]} samples, "
-                      f"{self.gallery_embeddings.shape[1]} parts, PIDs: {torch.unique(self.gallery_pids).tolist()}")
             else:
-                print("        No initial gallery found, starting with empty gallery")
                 self._initialize_empty_gallery()
         else:
-            print("        No gallery directory provided, starting with empty gallery")
             self._initialize_empty_gallery()
 
     def _initialize_empty_gallery(self):
@@ -237,7 +228,7 @@ class PersonReIDService:
         self.gallery_embeddings = torch.empty(0, 6, 512, device=self.device)
         self.gallery_visibility = torch.empty(0, 6, device=self.device)
         self.gallery_pids = torch.empty(0, dtype=torch.long, device=self.device)
-        print("        Initialized empty gallery - will load embeddings dynamically from database")
+        self.pid_to_user_id = {}  # Maps numeric PID -> firebase user ID string
 
 
     def initialize_database_connection(self):
@@ -250,7 +241,6 @@ class PersonReIDService:
         Raises:
             Exception: If database initialization fails
         """
-        print("🔍 Checking database connection...")
         try:
             stats = self.db_manager.get_database_stats()
 
@@ -258,10 +248,8 @@ class PersonReIDService:
             self.db_stats['total_embeddings'] = stats['person_embeddings']
             self.db_stats['last_updated'] = time.time()
 
-            print(f"Database connection successful!")
 
         except Exception as e:
-            print(f"Database initialization failed: {e}")
             raise
 
 
@@ -274,20 +262,16 @@ class PersonReIDService:
             pids_file = pt_dir / 'pids.pt'
 
             if not (embeddings_file.exists() and visibility_file.exists() and pids_file.exists()):
-                print(f"[LOAD_ERROR] Missing .pt files in {pt_dir}")
                 return None, None, None
 
             embeddings = torch.load(embeddings_file, map_location=self.device)
             visibility = torch.load(visibility_file, map_location=self.device)
             pids = torch.load(pids_file, map_location=self.device)
 
-            print(f"[LOAD] Loaded embeddings from {pt_dir}")
-            print(f"       Shape: {embeddings.shape}, PIDs: {torch.unique(pids).tolist()}")
 
             return embeddings, visibility, pids
 
         except Exception as e:
-            print(f"[LOAD_ERROR] Failed to load embeddings from {pt_path}: {e}")
             return None, None, None
 
 
@@ -299,14 +283,10 @@ class PersonReIDService:
             self.gallery_visibility = torch.cat([self.gallery_visibility, visibility], dim=0)
             self.gallery_pids = torch.cat([self.gallery_pids, pids], dim=0)
 
-            print(f"[GALLERY] Added {embeddings.shape[0]} new samples")
-            print(f"          Total gallery size: {self.gallery_embeddings.shape[0]} samples")
-            print(f"          Total unique PIDs: {len(torch.unique(self.gallery_pids))}")
 
             return True
 
         except Exception as e:
-            print(f"[GALLERY_ERROR] Failed to add embeddings to gallery: {e}")
             return False
 
     def poll_and_load_new_embeddings(self):
@@ -377,7 +357,114 @@ class PersonReIDService:
             return torch.tensor([], dtype=torch.float32).reshape(0, 6)
         
         return torch.tensor(detections_list, dtype=torch.float32)
-    
+
+    # --- Keypoint-based person signature for cache validation ---
+    # COCO keypoint indices
+    KP_L_SHOULDER, KP_R_SHOULDER = 5, 6
+    KP_L_ELBOW, KP_R_ELBOW = 7, 8
+    KP_L_WRIST, KP_R_WRIST = 9, 10
+    KP_L_HIP, KP_R_HIP = 11, 12
+    KP_L_KNEE, KP_R_KNEE = 13, 14
+    KP_L_ANKLE, KP_R_ANKLE = 15, 16
+
+    # Bone pairs for computing normalized body proportions
+    BONE_PAIRS = [
+        (5, 6),    # shoulder width
+        (11, 12),  # hip width
+        (5, 7),    # left upper arm
+        (6, 8),    # right upper arm
+        (7, 9),    # left forearm
+        (8, 10),   # right forearm
+        (11, 13),  # left upper leg
+        (12, 14),  # right upper leg
+        (13, 15),  # left lower leg
+        (14, 16),  # right lower leg
+    ]
+
+    @staticmethod
+    def compute_keypoint_signature(keypoints, min_kp_conf=0.3):
+        """
+        Compute a normalized bone-length signature from COCO 17 keypoints.
+        This signature represents body proportions and is unique per person.
+
+        Args:
+            keypoints: numpy array [17, 3] with (x, y, confidence)
+            min_kp_conf: minimum keypoint confidence to use
+
+        Returns:
+            numpy array of normalized bone lengths, or None if insufficient keypoints
+        """
+        if keypoints is None or keypoints.shape[0] < 17:
+            return None
+
+        bone_lengths = []
+        valid_count = 0
+        for (a, b) in PersonReIDService.BONE_PAIRS:
+            if keypoints[a, 2] >= min_kp_conf and keypoints[b, 2] >= min_kp_conf:
+                dx = keypoints[a, 0] - keypoints[b, 0]
+                dy = keypoints[a, 1] - keypoints[b, 1]
+                bone_lengths.append(np.sqrt(dx * dx + dy * dy))
+                valid_count += 1
+            else:
+                bone_lengths.append(0.0)
+
+        # Need at least 4 valid bones for a meaningful signature
+        if valid_count < 4:
+            return None
+
+        bone_lengths = np.array(bone_lengths, dtype=np.float32)
+
+        # Normalize by the sum of valid bones (scale-invariant)
+        total = bone_lengths[bone_lengths > 0].sum()
+        if total < 1e-6:
+            return None
+        bone_lengths = bone_lengths / total
+
+        return bone_lengths
+
+    @staticmethod
+    def compare_keypoint_signatures(sig1, sig2):
+        """
+        Compare two keypoint signatures. Returns similarity 0-1.
+        Only compares bones where both signatures have valid values (>0).
+        """
+        if sig1 is None or sig2 is None:
+            return 0.0
+
+        # Only compare where both have valid bones
+        valid = (sig1 > 0) & (sig2 > 0)
+        if valid.sum() < 3:
+            return 0.0
+
+        diff = np.abs(sig1[valid] - sig2[valid])
+        similarity = 1.0 - np.mean(diff) * 5.0  # Scale so typical variance maps to ~0.7-0.9
+        return max(0.0, min(1.0, similarity))
+
+    def match_detection_to_track(self, person_detections, track_bbox):
+        """
+        Find the detection that best matches a tracked bbox by IoU.
+        Returns the keypoints from the best matching detection, or None.
+        """
+        tx1, ty1, tx2, ty2 = track_bbox
+        best_iou = 0.0
+        best_kps = None
+
+        for det in person_detections:
+            dx1, dy1, dx2, dy2 = det['bbox']
+            # Compute IoU
+            ix1 = max(tx1, dx1); iy1 = max(ty1, dy1)
+            ix2 = min(tx2, dx2); iy2 = min(ty2, dy2)
+            if ix2 <= ix1 or iy2 <= iy1:
+                continue
+            inter = (ix2 - ix1) * (iy2 - iy1)
+            area_t = max(1, (tx2 - tx1) * (ty2 - ty1))
+            area_d = max(1, (dx2 - dx1) * (dy2 - dy1))
+            iou = inter / (area_t + area_d - inter)
+            if iou > best_iou:
+                best_iou = iou
+                best_kps = det.get('keypoints')
+
+        return best_kps if best_iou > 0.3 else None
 
 
     def cache_master_list(self, person_name, camera_id, track_id):
@@ -408,26 +495,22 @@ class PersonReIDService:
                 }
                 self.master_person_list.append(entry)
 
-                # Insert into database with global_id (PID) directly
+                # Insert into database (global_id is integer column, pass None if no numeric ID)
                 try:
-                    # person_name is the string representation of PID
-                    # Convert to integer for global_id
-                    global_id = int(person_name)
-
                     db_success = self.db_manager.insert_person_reid_log(
-                        person_name, camera_id, track_id, global_id=global_id
+                        person_name, camera_id, track_id, global_id=None
                     )
 
                     if db_success:
-                        print(f"[DB SAVED] PID {global_id} detected on {camera_id} with track {track_id}")
+                        pass
                     else:
-                        print(f"[DB FAILED] PID {global_id} detected on {camera_id} with track {track_id}")
+                        pass
 
                     # Mark this track as saved
                     self.logged_tracks.add(track_key)
 
                 except Exception as e:
-                    print(f"Error saving to database: {e}")
+                    pass
 
     def process_frame_for_reid(self, frame, camera_id):
         """
@@ -468,17 +551,13 @@ class PersonReIDService:
                             (frame.shape[0], frame.shape[1])
                         )
 
-                        # Clear voting and cached tracks for this camera
-                        keys_to_remove = [key for key in self.cached_tracks.keys() if key[0] == camera_id]
-                        for key in keys_to_remove:
-                            del self.cached_tracks[key]
-
+                        # Only clear voting (not cached tracks) on empty frame
                         keys_to_remove = [key for key in self.track_voting.keys() if key[0] == camera_id]
                         for key in keys_to_remove:
                             del self.track_voting[key]
 
                     except Exception as e:
-                        print(f"Error updating tracker with empty values: {e}")
+                        pass
 
                     self.last_detection_time[sample_id] = now
 
@@ -527,102 +606,234 @@ class PersonReIDService:
 
                 cache_key = (cam_id, track_id)
 
+                # Get current keypoints for this track
+                current_kps = self.match_detection_to_track(person_detections, [x1, y1, x2, y2])
+                current_sig = self.compute_keypoint_signature(current_kps)
+
                 # Check if this track is already cached
                 if cache_key in self.cached_tracks:
-                    person_name = self.cached_tracks[cache_key]['person_id']
-                    result_distance = self.cached_tracks[cache_key]['distance']
-                    is_cached = True
+                    # Keypoint-based cache validation to detect track ID swaps
+                    cached_sig = self.cached_tracks[cache_key].get('kp_signature')
+                    cache_valid = True
 
-                else:
-                    # Crop for ReID
-                    person_crop = self.person_detector.get_person_crop(frame, [x1, y1, x2, y2], padding=10)
+                    if current_sig is not None and cached_sig is not None:
+                        sim = self.compare_keypoint_signatures(current_sig, cached_sig)
 
-                    if person_crop is None:
-                        continue
+                        if sim < 0.5:
+                            # Signature mismatch — possible track ID swap
+                            # Check if another cached track matches this person better
+                            best_swap_key = None
+                            best_swap_sim = sim  # current (bad) similarity
 
-                    # Convert to RGB
-                    crop_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
+                            for other_key, other_data in self.cached_tracks.items():
+                                if other_key == cache_key or other_key[0] != cam_id:
+                                    continue
+                                other_sig = other_data.get('kp_signature')
+                                if other_sig is not None:
+                                    other_sim = self.compare_keypoint_signatures(current_sig, other_sig)
+                                    if other_sim > best_swap_sim and other_sim > 0.6:
+                                        best_swap_sim = other_sim
+                                        best_swap_key = other_key
 
-                    # Extract embeddings using BPBreID
-                    model_output = self.extractor([crop_rgb])
-                    embeddings, visibility = self.extract_test_embeddings(model_output)
-                    embeddings = embeddings.to(self.device)
-                    visibility = visibility.to(self.device)
+                            if best_swap_key is not None:
+                                # Swap the two caches to correct the track ID mix-up
+                                self.cached_tracks[cache_key], self.cached_tracks[best_swap_key] = \
+                                    self.cached_tracks[best_swap_key], self.cached_tracks[cache_key]
+                            else:
+                                # No swap partner found — invalidate this cache, re-vote
+                                del self.cached_tracks[cache_key]
+                                if cache_key in self.track_voting:
+                                    del self.track_voting[cache_key]
+                                cache_valid = False
 
-                    # Check if gallery is empty
-                    if self.gallery_embeddings.shape[0] == 0:
-                        person_name = "UNKNOWN"
-                        result_distance = 999.0
-                        is_cached = False
+                    if cache_valid and cache_key in self.cached_tracks:
+                        person_name = self.cached_tracks[cache_key]['person_id']
+                        result_distance = self.cached_tracks[cache_key]['distance']
+                        self.cached_tracks[cache_key]['bbox'] = [x1, y1, x2, y2]
+                        # Update keypoint signature with exponential moving average
+                        if current_sig is not None:
+                            if cached_sig is not None:
+                                self.cached_tracks[cache_key]['kp_signature'] = 0.8 * cached_sig + 0.2 * current_sig
+                            else:
+                                self.cached_tracks[cache_key]['kp_signature'] = current_sig
+
+                        # Re-collect embedding when pose/aspect ratio changes significantly
+                        cur_w = max(1, x2 - x1)
+                        cur_h = max(1, y2 - y1)
+                        cur_ar = cur_w / cur_h
+                        cached_ar = self.cached_tracks[cache_key].get('initial_ar')
+                        last_recollect = self.cached_tracks[cache_key].get('last_recollect', 0)
+
+                        if cached_ar is not None:
+                            ar_change = abs(cur_ar - cached_ar) / max(cached_ar, 0.01)
+                            now_rc = time.time()
+                            # Re-collect if aspect ratio changed >40% and at least 5s since last
+                            if ar_change > 0.4 and (now_rc - last_recollect) > 5.0:
+                                try:
+                                    rc_crop = self.person_detector.get_person_crop(frame, [x1, y1, x2, y2], padding=10)
+                                    if rc_crop is not None and self.gallery_embeddings.shape[0] > 0:
+                                        rc_rgb = cv2.cvtColor(rc_crop, cv2.COLOR_BGR2RGB)
+                                        rc_output = self.extractor([rc_rgb])
+                                        rc_emb, rc_vis = self.extract_test_embeddings(rc_output)
+                                        rc_emb = rc_emb.to(self.device)
+                                        rc_vis = rc_vis.to(self.device)
+
+                                        # Find the PID for this person_name
+                                        rc_pid = None
+                                        for pid, name in self.pid_to_user_id.items():
+                                            if name == person_name:
+                                                rc_pid = pid
+                                                break
+
+                                        if rc_pid is not None:
+                                            rc_pids = torch.tensor([rc_pid], dtype=torch.long, device=self.device)
+                                            self.add_to_gallery(rc_emb, rc_vis, rc_pids)
+                                            self.cached_tracks[cache_key]['last_recollect'] = now_rc
+                                            self.cached_tracks[cache_key]['initial_ar'] = cur_ar
+                                            print(f"[RECOLLECT] {cam_id}:T{track_id} '{person_name}' AR {cached_ar:.2f}->{cur_ar:.2f} (change {ar_change:.0%}) | gallery size: {self.gallery_embeddings.shape[0]}")
+                                except Exception as e:
+                                    print(f"[RECOLLECT_ERR] {cam_id}:T{track_id} - {e}")
+                        else:
+                            self.cached_tracks[cache_key]['initial_ar'] = cur_ar
+
+                        is_cached = True
                     else:
-                        # Compute distances using BPBreID distance calculation
-                        with torch.no_grad():
-                            distmat, _ = compute_distance_matrix_using_bp_features(
-                                embeddings,
-                                self.gallery_embeddings,
-                                visibility,
-                                self.gallery_visibility,
-                                dist_combine_strat=self.cfg.test.part_based.dist_combine_strat,
-                                batch_size_pairwise_dist_matrix=self.cfg.test.batch_size_pairwise_dist_matrix,
-                                use_gpu=self.cfg.use_gpu,
-                                metric='euclidean'
-                            )
+                        # Cache was invalidated — fall through to re-identification below
+                        cache_valid = False
 
-                        # Get best match
-                        distances = distmat[0].cpu().numpy()
-                        best_idx = np.argmin(distances)
-                        best_pid = int(self.gallery_pids[best_idx].item())
-                        best_dist = distances[best_idx]
-
-                        person_name = str(best_pid)
-                        result_distance = best_dist
-                        is_cached = False
-
-                        # Voting logic
-                        if cache_key not in self.track_voting:
-                            self.track_voting[cache_key] = {
-                                'votes': {},
-                                'frame_count': 0,
-                                'distances': {}
-                            }
-
-                        voting_entry = self.track_voting[cache_key]
-                        voting_entry['frame_count'] += 1
-
-                        # Count vote if distance < voting_threshold
-                        if best_dist < self.voting_threshold:
-                            if person_name not in voting_entry['votes']:
-                                voting_entry['votes'][person_name] = 0
-                                voting_entry['distances'][person_name] = best_dist
-                            voting_entry['votes'][person_name] += 1
-                            voting_entry['distances'][person_name] = min(
-                                voting_entry['distances'][person_name],
-                                best_dist
-                            )
-
-                        # Check if we've collected enough frames
-                        if voting_entry['frame_count'] >= self.voting_window:
-                            if voting_entry['votes']:
-                                max_votes_id = max(voting_entry['votes'], key=voting_entry['votes'].get)
-                                max_votes = voting_entry['votes'][max_votes_id]
-
-                                if max_votes >= self.min_votes:
+                if cache_key not in self.cached_tracks:
+                    # Try to inherit cache from a recently disappeared track with overlapping bbox
+                    inherited = False
+                    current_bbox = [x1, y1, x2, y2]
+                    for old_key, old_data in list(self.cached_tracks.items()):
+                        if old_key[0] == cam_id and 'last_seen' in old_data and 'bbox' in old_data:
+                            # Check spatial overlap with disappeared track's last bbox
+                            ox1, oy1, ox2, oy2 = old_data['bbox']
+                            ix1 = max(x1, ox1); iy1 = max(y1, oy1)
+                            ix2 = min(x2, ox2); iy2 = min(y2, oy2)
+                            if ix2 > ix1 and iy2 > iy1:
+                                inter = (ix2 - ix1) * (iy2 - iy1)
+                                area_new = max(1, (x2 - x1) * (y2 - y1))
+                                if inter / area_new > 0.3:
+                                    # Transfer cache to new track (preserve keypoint signature)
                                     self.cached_tracks[cache_key] = {
-                                        'person_id': max_votes_id,
-                                        'distance': voting_entry['distances'][max_votes_id],
-                                        'votes': max_votes
+                                        'person_id': old_data['person_id'],
+                                        'distance': old_data['distance'],
+                                        'votes': old_data['votes'],
+                                        'kp_signature': old_data.get('kp_signature')
                                     }
-                                    print(f"[CACHE] {cam_id} T{track_id} -> ID{max_votes_id} "
-                                          f"(votes={max_votes}/{self.voting_window})")
-
-                                    person_name = max_votes_id
-                                    result_distance = voting_entry['distances'][max_votes_id]
+                                    del self.cached_tracks[old_key]
+                                    person_name = old_data['person_id']
+                                    result_distance = old_data['distance']
                                     is_cached = True
+                                    inherited = True
+                                    break
 
-                                    # Save to database (person_reid_mapped table)
-                                    self.cache_master_list(max_votes_id, cam_id, track_id)
+                    if inherited:
+                        pass  # Already set above
+                    else:
+                        # Crop for ReID
+                        person_crop = self.person_detector.get_person_crop(frame, [x1, y1, x2, y2], padding=10)
 
-                            del self.track_voting[cache_key]
+                        if person_crop is None:
+                            continue
+
+                        # Convert to RGB
+                        crop_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
+
+                        # Extract embeddings using BPBreID
+                        model_output = self.extractor([crop_rgb])
+                        embeddings, visibility = self.extract_test_embeddings(model_output)
+                        embeddings = embeddings.to(self.device)
+                        visibility = visibility.to(self.device)
+
+                        # Check if gallery is empty
+                        if self.gallery_embeddings.shape[0] == 0:
+                            person_name = "UNKNOWN"
+                            result_distance = 999.0
+                            is_cached = False
+                        else:
+                            # Compute distances using BPBreID distance calculation
+                            with torch.no_grad():
+                                distmat, _ = compute_distance_matrix_using_bp_features(
+                                    embeddings,
+                                    self.gallery_embeddings,
+                                    visibility,
+                                    self.gallery_visibility,
+                                    dist_combine_strat=self.cfg.test.part_based.dist_combine_strat,
+                                    batch_size_pairwise_dist_matrix=self.cfg.test.batch_size_pairwise_dist_matrix,
+                                    use_gpu=self.cfg.use_gpu,
+                                    metric='euclidean'
+                                )
+
+                            # Get best match
+                            distances = distmat[0].cpu().numpy()
+                            best_idx = np.argmin(distances)
+                            best_pid = int(self.gallery_pids[best_idx].item())
+                            best_dist = distances[best_idx]
+
+                            person_name = self.pid_to_user_id.get(best_pid, str(best_pid))
+                            result_distance = best_dist
+                            is_cached = False
+
+                            # Voting logic
+                            if cache_key not in self.track_voting:
+                                self.track_voting[cache_key] = {
+                                    'votes': {},
+                                    'frame_count': 0,
+                                    'distances': {}
+                                }
+
+                            voting_entry = self.track_voting[cache_key]
+                            voting_entry['frame_count'] += 1
+
+                            # Count vote if distance < voting_threshold
+                            if best_dist < self.voting_threshold:
+                                if person_name not in voting_entry['votes']:
+                                    voting_entry['votes'][person_name] = 0
+                                    voting_entry['distances'][person_name] = best_dist
+                                voting_entry['votes'][person_name] += 1
+                                voting_entry['distances'][person_name] = min(
+                                    voting_entry['distances'][person_name],
+                                    best_dist
+                                )
+
+                            # Check if we've collected enough frames
+                            if voting_entry['frame_count'] >= self.voting_window:
+                                if voting_entry['votes']:
+                                    max_votes_id = max(voting_entry['votes'], key=voting_entry['votes'].get)
+                                    max_votes = voting_entry['votes'][max_votes_id]
+
+                                    if max_votes >= self.min_votes:
+                                        # Prevent duplicate: skip if another active track on same camera already has this identity
+                                        already_taken = False
+                                        for ck, cd in self.cached_tracks.items():
+                                            if ck[0] == cam_id and ck != cache_key and 'last_seen' not in cd:
+                                                if cd.get('person_id') == max_votes_id:
+                                                    already_taken = True
+                                                    break
+
+                                        if not already_taken:
+                                            init_w = max(1, x2 - x1)
+                                            init_h = max(1, y2 - y1)
+                                            self.cached_tracks[cache_key] = {
+                                                'person_id': max_votes_id,
+                                                'distance': voting_entry['distances'][max_votes_id],
+                                                'votes': max_votes,
+                                                'bbox': [x1, y1, x2, y2],
+                                                'kp_signature': current_sig,
+                                                'initial_ar': init_w / init_h,
+                                                'last_recollect': 0
+                                            }
+
+                                            person_name = max_votes_id
+                                            result_distance = voting_entry['distances'][max_votes_id]
+                                            is_cached = True
+
+                                            # Save to database (person_reid_mapped table)
+                                            self.cache_master_list(max_votes_id, cam_id, track_id)
+
+                                del self.track_voting[cache_key]
 
                 # Determine if recognized
                 is_recognized = result_distance < self.matching_threshold
@@ -638,12 +849,40 @@ class PersonReIDService:
                     'similarity': 1.0 / (1.0 + result_distance)  # Convert distance to similarity for compatibility
                 })
 
-            # Cleanup disappeared tracks
+            # Deduplicate: only one track per camera can claim a given identity
+            # The track with the lowest distance wins; others become UNKNOWN
+            name_best = {}  # {person_name: index of best result}
+            for i, r in enumerate(reid_results):
+                name = r['person_name']
+                if name == "UNKNOWN":
+                    continue
+                if name not in name_best or r['distance'] < reid_results[name_best[name]]['distance']:
+                    name_best[name] = i
+
+            for i, r in enumerate(reid_results):
+                name = r['person_name']
+                if name != "UNKNOWN" and name_best.get(name) != i:
+                    reid_results[i]['person_name'] = "UNKNOWN"
+                    reid_results[i]['match'] = None
+                    # Also remove the duplicate from cache
+                    dup_key = (r['camera_id'], r['track_id'])
+                    if dup_key in self.cached_tracks:
+                        del self.cached_tracks[dup_key]
+
+            # Cleanup disappeared tracks with time-based retention
             active_track_ids = {(camera_id, target[0]) for target in target_box}
-            disappeared_tracks = set(self.cached_tracks.keys()) - active_track_ids
-            for key in disappeared_tracks:
-                if key[0] == camera_id:
-                    del self.cached_tracks[key]
+            now_cleanup = time.time()
+
+            # Mark disappearance time instead of instant deletion
+            for key in list(self.cached_tracks.keys()):
+                if key[0] == camera_id and key not in active_track_ids:
+                    if 'last_seen' not in self.cached_tracks[key]:
+                        self.cached_tracks[key]['last_seen'] = now_cleanup
+                    elif now_cleanup - self.cached_tracks[key]['last_seen'] > 20.0:
+                        del self.cached_tracks[key]
+                elif key in active_track_ids:
+                    # Track is active again, refresh last_seen
+                    self.cached_tracks[key].pop('last_seen', None)
 
             disappeared_voting = set(self.track_voting.keys()) - active_track_ids
             for key in disappeared_voting:
@@ -695,7 +934,7 @@ class PersonReIDService:
                 self.db_stats['total_embeddings'] = stats['person_embeddings']
                 self.db_stats['last_updated'] = current_time
         except Exception as e:
-            print(f"[WARNING] Failed to update database stats: {e}")
+            pass
 
     def processing_thread(self, camera_id):
         """
@@ -707,7 +946,6 @@ class PersonReIDService:
         Args:
             camera_id (str): Camera identifier
         """
-        print(f"Starting processing thread for {camera_id} camera")
         
         # Initialize persistent detection data for this camera
         persistent_detections = []
@@ -757,7 +995,6 @@ class PersonReIDService:
                     time.sleep(0.01)
                     
             except Exception as e:
-                print(f"Error in processing thread for {camera_id}: {e}")
                 time.sleep(0.1)
     
     def calculate_display_dimensions(self, original_width, original_height, target_width, target_height):
@@ -1004,12 +1241,10 @@ class PersonReIDService:
         Returns:
             bool: False if no cameras started successfully, otherwise runs until interrupted
         """
-        print(f"Starting Person Re-Identification System ({self.num_cameras} cameras)...")
         
         # Start all cameras
         started_cameras = self.camera_manager.start_all_cameras()
         if started_cameras == 0:
-            print("No cameras started successfully!")
             return False
         
         time.sleep(3)  # Wait for initialization
@@ -1037,7 +1272,7 @@ class PersonReIDService:
                 key = cv2.waitKey(33) & 0xFF
         
         except KeyboardInterrupt:
-            print("\nShutting down...")
+            pass
         finally:
             self.stop_system()
 
@@ -1048,7 +1283,6 @@ class PersonReIDService:
 
         Gracefully shuts down all cameras, processing threads, and cleans up resources.
         """
-        print("Stopping person re-identification system...")
         self.running = False
         
         # Stop all cameras

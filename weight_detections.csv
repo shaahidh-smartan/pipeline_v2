@@ -1,1 +1,2 @@
 timestamp,camera_id,track_id,weight_label,confidence,bbox
+2026-02-19T17:35:45.716357,cam_1,15,o1_7.5kg_1,0.823,"383,296,467,326"

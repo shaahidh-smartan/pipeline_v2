@@ -23,12 +23,14 @@ class SimilaritySearch:
             
             cur = conn.cursor()
             
-            # Cosine similarity search
+            # Cosine similarity search using firebase_users table
             cur.execute("""
-                SELECT person_name, 1 - (embedding <=> %s::vector) AS similarity
-                FROM face_embeddings
-                WHERE 1 - (embedding <=> %s::vector) >= %s
-                ORDER BY embedding <=> %s::vector ASC
+                SELECT COALESCE(NULLIF(raw_data->>'displayName', ''), raw_data->>'email', id) AS person_name,
+                       1 - (face_embedding::vector <=> %s::vector) AS similarity
+                FROM firebase_users
+                WHERE face_embedding IS NOT NULL
+                  AND 1 - (face_embedding::vector <=> %s::vector) >= %s
+                ORDER BY face_embedding::vector <=> %s::vector ASC
                 LIMIT 1;
             """, (vec.tolist(), vec.tolist(), threshold, vec.tolist()))
             
@@ -47,7 +49,6 @@ class SimilaritySearch:
             return None, 0.0
 
         except Exception as e:
-            print(f"[ERROR] Face cosine search failed: {e}")
             if conn:
                 self.db_manager.return_connection(conn)
             return None, 0.0
@@ -67,11 +68,13 @@ class SimilaritySearch:
             
             cur = conn.cursor()
             
-            # Euclidean distance search - INCLUDE ID for BPBreID foreign key
+            # Euclidean distance search using firebase_users table
             cur.execute("""
-                SELECT id, person_name, embedding <-> %s::vector AS distance
-                FROM face_embeddings
-                WHERE embedding <-> %s::vector <= %s
+                SELECT id, COALESCE(NULLIF(raw_data->>'displayName', ''), raw_data->>'email', id) AS person_name,
+                       face_embedding::vector <-> %s::vector AS distance
+                FROM firebase_users
+                WHERE face_embedding IS NOT NULL
+                  AND face_embedding::vector <-> %s::vector <= %s
                 ORDER BY distance ASC
                 LIMIT 1;
             """, (vec.tolist(), vec.tolist(), threshold))
@@ -95,7 +98,6 @@ class SimilaritySearch:
             return None, 0.0
 
         except Exception as e:
-            print(f"[ERROR] Face euclidean search failed: {e}")
             if conn:
                 self.db_manager.return_connection(conn)
             return None, 0.0
@@ -139,7 +141,6 @@ class SimilaritySearch:
             return None, 0.0
 
         except Exception as e:
-            print(f"[ERROR] Person cosine search failed: {e}")
             if conn:
                 self.db_manager.return_connection(conn)
             return None, 0.0
@@ -191,7 +192,6 @@ class SimilaritySearch:
             return None, 0.0
 
         except Exception as e:
-            print(f"[ERROR] Person euclidean search failed: {e}")
             if conn:
                 self.db_manager.return_connection(conn)
             return None, 0.0
@@ -214,7 +214,6 @@ class SimilaritySearch:
             return similarity
             
         except Exception as e:
-            print(f"[ERROR] Cosine similarity calculation failed: {e}")
             return 0.0
     
     def compare_embeddings_euclidean(self, embedding1, embedding2):
@@ -235,10 +234,9 @@ class SimilaritySearch:
             return distance
             
         except Exception as e:
-            print(f"[ERROR] Euclidean distance calculation failed: {e}")
             return float('inf')
     
-    def get_top_matches(self, query_embedding, table='face_embeddings', 
+    def get_top_matches(self, query_embedding, table='firebase_users',
                        similarity_type='cosine', top_k=5):
         """Get top K matches for a query embedding."""
         try:
@@ -255,11 +253,13 @@ class SimilaritySearch:
             cur = conn.cursor()
             
             if similarity_type == 'cosine':
-                if table == 'face_embeddings':
+                if table == 'firebase_users':
                     cur.execute("""
-                        SELECT person_name, 1 - (embedding <=> %s::vector) AS similarity
-                        FROM face_embeddings
-                        ORDER BY embedding <=> %s::vector ASC
+                        SELECT raw_data->>'displayName' AS person_name,
+                               1 - (face_embedding::vector <=> %s::vector) AS similarity
+                        FROM firebase_users
+                        WHERE face_embedding IS NOT NULL
+                        ORDER BY face_embedding::vector <=> %s::vector ASC
                         LIMIT %s;
                     """, (vec.tolist(), vec.tolist(), top_k))
                 else:  # vgg_embeddings
@@ -270,10 +270,12 @@ class SimilaritySearch:
                         LIMIT %s;
                     """, (vec.tolist(), vec.tolist(), top_k))
             else:  # euclidean
-                if table == 'face_embeddings':
+                if table == 'firebase_users':
                     cur.execute("""
-                        SELECT person_name, embedding <-> %s::vector AS distance
-                        FROM face_embeddings
+                        SELECT raw_data->>'displayName' AS person_name,
+                               face_embedding::vector <-> %s::vector AS distance
+                        FROM firebase_users
+                        WHERE face_embedding IS NOT NULL
                         ORDER BY distance ASC
                         LIMIT %s;
                     """, (vec.tolist(), top_k))
@@ -292,7 +294,6 @@ class SimilaritySearch:
             return results
 
         except Exception as e:
-            print(f"[ERROR] Top matches search failed: {e}")
             if conn:
                 self.db_manager.return_connection(conn)
             return []
@@ -336,7 +337,6 @@ class SimilaritySearch:
             return None, 0.0
 
         except Exception as e:
-            print(f"[ERROR] SOLIDER cosine search failed: {e}")
             if conn:
                 self.db_manager.return_connection(conn)
             return None, 0.0
@@ -347,13 +347,11 @@ class SimilaritySearch:
             vec = query_embedding.astype(np.float32)
             norm = np.linalg.norm(vec)
             if norm == 0:
-                print("[DEBUG] TransReID: Zero norm embedding")
                 return None, 0.0
             vec = vec / norm
 
             conn = self.db_manager.get_connection()
             if not conn:
-                print("[DEBUG] TransReID: No database connection")
                 return None, 0.0
 
             cur = conn.cursor()
@@ -361,8 +359,6 @@ class SimilaritySearch:
             # First check if table has any data
             cur.execute("SELECT COUNT(*) FROM transreid_embeddings")
             count = cur.fetchone()[0]
-            print(f"[DEBUG] TransReID: Found {count} embeddings in database")
-            print(f"[DEBUG] TransReID: Query embedding dim={len(vec)}, first 5 values={vec[:5].tolist()}")
 
             # Get best match regardless of threshold, then filter
             try:
@@ -374,9 +370,7 @@ class SimilaritySearch:
                 """, (vec.tolist(), vec.tolist()))
 
                 row = cur.fetchone()
-                print(f"[DEBUG] TransReID: Query executed, row={row}")
             except Exception as query_error:
-                print(f"[ERROR] TransReID: Query failed - {query_error}")
                 cur.close()
                 self.db_manager.return_connection(conn)
                 return None, 0.0
@@ -389,7 +383,6 @@ class SimilaritySearch:
                 similarity = float(similarity)
 
                 if similarity >= threshold:
-                    print(f"[DEBUG] TransReID: Match found - {person_name} with similarity {similarity:.3f}")
                     return {
                         'person_name': person_name,
                         'similarity': similarity,
@@ -397,15 +390,12 @@ class SimilaritySearch:
                         'match_type': 'transreid_cosine'
                     }, similarity
                 else:
-                    print(f"[DEBUG] TransReID: Best match {person_name} ({similarity:.3f}) below threshold {threshold}")
                     # Return None for match but actual similarity score
                     return None, similarity
 
-            print(f"[DEBUG] TransReID: No embeddings found in database")
             return None, 0.0
 
         except Exception as e:
-            print(f"[ERROR] TransReID cosine search failed: {e}")
             if conn:
                 self.db_manager.return_connection(conn)
             import traceback
@@ -435,7 +425,6 @@ class SimilaritySearch:
 
             conn = self.db_manager.get_connection()
             if not conn:
-                print("[DEBUG] BPBreID: No database connection")
                 return None, 0.0
 
             cur = conn.cursor()
@@ -444,12 +433,10 @@ class SimilaritySearch:
             cur.execute("SELECT COUNT(DISTINCT face_id) FROM bpbreid_embeddings")
             count = cur.fetchone()[0]
             if count == 0:
-                print("[DEBUG] BPBreID: No embeddings in database")
                 cur.close()
                 conn.close()
                 return None, 0.0
 
-            print(f"[DEBUG] BPBreID: Found {count} persons in database")
 
             # Query each visible body part and aggregate scores per person
             # Using visibility threshold of 0.5 (only match visible parts)
@@ -490,7 +477,6 @@ class SimilaritySearch:
             self.db_manager.return_connection(conn)
 
             if not part_similarities:
-                print("[DEBUG] BPBreID: No matches found for any body part")
                 return None, 0.0
 
             # Find best match: person with highest average similarity across matched parts
@@ -513,24 +499,21 @@ class SimilaritySearch:
                     best_matched_parts = num_matched_parts
 
             if best_face_id is None or best_similarity < threshold:
-                print(f"[DEBUG] BPBreID: Best match below threshold ({best_similarity:.3f} < {threshold})")
                 return None, best_similarity
 
-            # Get person name from face_embeddings
+            # Get person name from firebase_users
             conn2 = self.db_manager.get_connection()
             if not conn2:
                 return None, 0.0
 
             cur = conn2.cursor()
-            cur.execute("SELECT person_name FROM face_embeddings WHERE id = %s", (best_face_id,))
+            cur.execute("SELECT raw_data->>'displayName' FROM firebase_users WHERE id = %s", (best_face_id,))
             row = cur.fetchone()
             cur.close()
             self.db_manager.return_connection(conn2)
 
             if row:
                 person_name = row[0]
-                print(f"[DEBUG] BPBreID: Match found - {person_name} (face_id={best_face_id}) "
-                      f"with similarity {best_similarity:.3f} ({best_matched_parts} parts)")
 
                 return {
                     'person_name': person_name,
@@ -543,7 +526,6 @@ class SimilaritySearch:
             return None, 0.0
 
         except Exception as e:
-            print(f"[ERROR] BPBreID cosine search failed: {e}")
             if conn:
                 self.db_manager.return_connection(conn)
             import traceback

@@ -10,6 +10,7 @@ import sys
 import torch
 import random
 import pickle
+import hashlib
 from enum import Enum
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,11 @@ class Job:
     camera_id: str
     frame: np.ndarray
     ts: float
+
+
+def user_id_to_pid(user_id):
+    """Convert a firebase user ID string to a stable numeric PID for tensors."""
+    return int(hashlib.sha256(user_id.encode()).hexdigest()[:15], 16)
 
 
 def apply_brightness_augmentation(crop, brightness_factor=1.5):
@@ -154,14 +160,11 @@ class PersonEmbeddingCollector:
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Embeddings will be saved to: {self.output_dir}")
 
         # Initialize database for face recognition only
-        print("Initializing database manager (for face recognition only)...")
         self.db_manager = DatabaseManager()
 
         # Initialize CPU-side utilities only
-        print("Initializing similarity search...")
         self.similarity_search = SimilaritySearch(self.db_manager)
 
         # GPU models will be initialized in worker thread
@@ -230,8 +233,7 @@ class PersonEmbeddingCollector:
         }
 
         # Designated zone for person positioning (normalized coordinates for 640x480)
-        self.designated_zone =  np.array([[478, 484], [757, 481], [802, 655], [439, 661]])
-
+        self.designated_zone =  np.array([[685, 676], [741, 538], [1011, 554], [1022, 695]])
 
         # Person tracking for zone-based collection
         self.person_tracking_lock = threading.Lock()
@@ -246,7 +248,6 @@ class PersonEmbeddingCollector:
         # Initialize pipelines
         self.initialize_cameras()
 
-        print("PersonEmbeddingCollector initialized - GPU models will load in worker thread")
 
     def _init_redis_connection(self):
         """Initialize Redis connection for embedding communication."""
@@ -261,14 +262,9 @@ class PersonEmbeddingCollector:
             )
             # Test connection
             self.redis_client.ping()
-            print(f"[REDIS] Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
-            print(f"[REDIS] Embedding stream: {REDIS_EMBEDDING_STREAM}")
         except ImportError:
-            print("[REDIS] ERROR: redis-py not installed. Install with: pip install redis")
             self.redis_client = None
         except Exception as e:
-            print(f"[REDIS] ERROR: Failed to connect to Redis: {e}")
-            print("[REDIS] Make sure Redis is running: sudo systemctl start redis")
             self.redis_client = None
 
     def publish_embeddings_to_redis(self, person_name, embeddings, visibility, pids, face_id):
@@ -280,13 +276,12 @@ class PersonEmbeddingCollector:
             embeddings (torch.Tensor): Embedding tensor [N, 6, 512]
             visibility (torch.Tensor): Visibility tensor [N, 6]
             pids (torch.Tensor): Person IDs tensor [N]
-            face_id (int): Face ID from face_embeddings table
+            face_id (str): Firebase user ID from firebase_users table
 
         Returns:
             bool: True if published successfully, False otherwise
         """
         if self.redis_client is None:
-            print(f"[REDIS] No Redis connection, skipping publish for {person_name}")
             return False
 
         try:
@@ -316,15 +311,10 @@ class PersonEmbeddingCollector:
                 approximate=True
             )
 
-            print(f"[REDIS] Published embeddings for {person_name} (face_id={face_id}) to stream")
-            print(f"[REDIS]   - Embeddings shape: {embeddings_cpu.shape}")
-            print(f"[REDIS]   - Visibility shape: {visibility_cpu.shape}")
-            print(f"[REDIS]   - PIDs: {torch.unique(pids_cpu).tolist()}")
 
             return True
 
         except Exception as e:
-            print(f"[REDIS] Error publishing embeddings for {person_name}: {e}")
             return False
 
     def update_embedding_status(self, person_id, person_name, pt_path, status='READY'):
@@ -332,7 +322,7 @@ class PersonEmbeddingCollector:
         Update the embedding_status table in the database.
 
         Args:
-            person_id (int): Person ID from face_embeddings table
+            person_id (str): Firebase user ID from firebase_users table
             person_name (str): Name of the person
             pt_path (str): Path to the .pt file directory
             status (str): Status of the embedding ('PENDING', 'READY', 'CONSUMED')
@@ -345,7 +335,6 @@ class PersonEmbeddingCollector:
 
             conn = self.db_manager.get_connection()
             if not conn:
-                print(f"[DB] Failed to get database connection for {person_name}")
                 return False
 
             cur = conn.cursor()
@@ -367,11 +356,9 @@ class PersonEmbeddingCollector:
             cur.close()
             conn.close()
 
-            print(f"[DB] Updated embedding_status for {person_name} (person_id={person_id}) with status={status}")
             return True
 
         except Exception as e:
-            print(f"[DB] Error updating embedding_status for {person_name}: {e}")
             return False
 
     def save_person_embeddings_to_pt(self, person_name, embeddings_list, visibility_list, face_id):
@@ -382,18 +369,17 @@ class PersonEmbeddingCollector:
             person_name (str): Name of the person
             embeddings_list (list): List of embedding tensors
             visibility_list (list): List of visibility tensors
-            face_id (int): Face ID from face_embeddings table (used as PID)
+            face_id (str): Firebase user ID from firebase_users table (converted to numeric PID)
 
         Returns:
             bool: True if save successful, False otherwise
         """
         try:
             if not embeddings_list or not visibility_list:
-                print(f"[PT] No embeddings to save for {person_name}")
                 return False
 
-            # Create person-specific directory
-            person_dir = self.output_dir / person_name
+            # Create person-specific directory using firebase user ID
+            person_dir = self.output_dir / face_id
             person_dir.mkdir(parents=True, exist_ok=True)
 
             # Concatenate all embeddings and visibility scores
@@ -404,19 +390,16 @@ class PersonEmbeddingCollector:
             all_embeddings = all_embeddings.cpu() if all_embeddings.is_cuda else all_embeddings
             all_visibility = all_visibility.cpu() if all_visibility.is_cuda else all_visibility
 
-            # Create PIDs tensor (all samples belong to same person, identified by face_id)
+            # Create PIDs tensor (all samples belong to same person, identified by firebase user ID)
             num_samples = all_embeddings.shape[0]
-            pids = torch.tensor([face_id] * num_samples, dtype=torch.long)
+            numeric_pid = user_id_to_pid(face_id)
+            pids = torch.tensor([numeric_pid] * num_samples, dtype=torch.long)
 
             # Save embeddings, visibility, and PIDs as separate files (like build_gallery_from_videos.py)
             torch.save(all_embeddings, person_dir / 'embeddings.pt')
             torch.save(all_visibility, person_dir / 'visibility.pt')
             torch.save(pids, person_dir / 'pids.pt')
 
-            print(f"[PT] Saved {all_embeddings.shape[0]} embeddings for {person_name} (PID={face_id}) to {person_dir}")
-            print(f"[PT]   - Embeddings shape: {all_embeddings.shape}")
-            print(f"[PT]   - Visibility shape: {all_visibility.shape}")
-            print(f"[PT]   - PIDs shape: {pids.shape}")
 
             # Publish embeddings to Redis for immediate consumption by main pipeline
             self.publish_embeddings_to_redis(
@@ -430,21 +413,20 @@ class PersonEmbeddingCollector:
             return True
 
         except Exception as e:
-            print(f"[PT] Error saving embeddings for {person_name}: {e}")
             return False
 
-    def check_person_embeddings_exist(self, person_name):
+    def check_person_embeddings_exist(self, face_id):
         """
         Check if embeddings already exist for a person.
 
         Args:
-            person_name (str): Name of the person
+            face_id (str): Firebase user ID
 
         Returns:
             bool: True if embeddings exist, False otherwise
         """
         try:
-            person_dir = self.output_dir / person_name
+            person_dir = self.output_dir / face_id
             embeddings_file = person_dir / 'embeddings.pt'
             visibility_file = person_dir / 'visibility.pt'
             pids_file = person_dir / 'pids.pt'
@@ -452,7 +434,6 @@ class PersonEmbeddingCollector:
             return embeddings_file.exists() and visibility_file.exists() and pids_file.exists()
 
         except Exception as e:
-            print(f"[PT] Error checking files for {person_name}: {e}")
             return False
 
     def is_person_in_zone(self, bbox):
@@ -484,7 +465,6 @@ class PersonEmbeddingCollector:
             None
         """
         # --- Construct models once, warmup once ---
-        print("[GPU] Initializing FacePipeline/PersonDetector/PersonEmbedder...")
         self.face_pipeline = FacePipeline()
         self.person_detector = PersonDetector()
         self.person_embedder = PersonEmbedder()
@@ -499,9 +479,8 @@ class PersonEmbeddingCollector:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         except Exception as e:
-            print(f"[GPU] Warmup note: {e}")
+            pass
 
-        print("[GPU] Ready.")
 
         while self.running:
             try:
@@ -515,7 +494,6 @@ class PersonEmbeddingCollector:
                     pi = np.mean(self._stats['person_infer_ms'][-50:] or [0])
                     with self.mode_lock:
                         mode_name = self.mode.name
-                    print(f"[GPU] face qwait={fq:.1f}ms infer={fi:.1f}ms | person qwait={pq:.1f}ms infer={pi:.1f}ms | mode={mode_name}")
                 continue
 
             q_wait_ms = (time.time() - job.ts) * 1000.0
@@ -534,11 +512,9 @@ class PersonEmbeddingCollector:
 
                     recognized_faces = []
                     self.debug_counters['face_detections'] += len(face_results)
-                    print(f"[FACE] Detected {len(face_results)} faces in {job.camera_id} camera")
 
                     for face_data in face_results:
                         if face_data.get('embedding') is None:
-                            print(f"[FACE] No embedding extracted for detected face in {job.camera_id}")
                             continue
 
                         # Convert similarity threshold to distance threshold
@@ -550,9 +526,8 @@ class PersonEmbeddingCollector:
                         if match:
                             self.debug_counters['recognized_faces'] += 1
                             recognized_faces.append((face_data, match))
-                            print(f"[FACE] Recognized: {match['name']} (similarity: {sim:.3f})")
                         else:
-                            print(f"[FACE] Face detected but no match found (best similarity: {sim:.3f}, threshold: {self.similarity_threshold})")
+                            pass
 
                     # Update camera display with face detections
                     camera_data = self.cameras[job.camera_id]
@@ -574,7 +549,7 @@ class PersonEmbeddingCollector:
 
                         with self.person_tracking_lock:
                             # Check if we should start collection for this person
-                            if self.should_start_frame_collection(person_name):
+                            if self.should_start_frame_collection(person_name, face_id):
                                 # If same person or no one waiting, set/update waiting person
                                 if self.waiting_person is None or self.waiting_person['name'] == person_name:
                                     if self.waiting_person is None:
@@ -584,11 +559,10 @@ class PersonEmbeddingCollector:
                                             'entered_zone_time': None,
                                             'camera_id': job.camera_id
                                         }
-                                        print(f"[WAITING] {person_name} recognized, waiting for them to enter zone...")
                                     # If same person, just refresh (keep existing state)
                                 else:
                                     # Different person recognized while someone waiting - ignore for now
-                                    print(f"[WAITING] {person_name} recognized but {self.waiting_person['name']} is already waiting")
+                                    pass
 
                 elif job.kind == 'PERSON':
                     # Person detection to track zone entry (only for RIGHT camera in FACES mode)
@@ -602,7 +576,6 @@ class PersonEmbeddingCollector:
                     self._stats['person_qwait_ms'].append(q_wait_ms)
                     self._stats['person_infer_ms'].append(infer_ms)
 
-                    print(f"[PERSON] Detected {len(person_dets)} persons in {job.camera_id} camera")
 
                     # Check if waiting person is in zone (RIGHT camera only)
                     with self.person_tracking_lock:
@@ -614,7 +587,6 @@ class PersonEmbeddingCollector:
                                 # Person entered zone
                                 if self.waiting_person['entered_zone_time'] is None:
                                     self.waiting_person['entered_zone_time'] = time.time()
-                                    print(f"[ZONE] {person_name} entered zone! Starting {self.countdown_duration}s countdown...")
 
                                 # Check if countdown completed
                                 elapsed = time.time() - self.waiting_person['entered_zone_time']
@@ -623,7 +595,6 @@ class PersonEmbeddingCollector:
                                     face_id = self.waiting_person['face_id']
                                     camera_id = self.waiting_person['camera_id']
 
-                                    print(f"[COLLECTION] Countdown complete! Starting collection for {person_name}")
                                     self.start_frame_collection(person_name, face_id, camera_id)
 
                                     # Switch mode to COLLECT
@@ -632,13 +603,11 @@ class PersonEmbeddingCollector:
 
                                     # Clear waiting person
                                     self.waiting_person = None
-                                    print(f"[MODE] Switched to COLLECT mode for {person_name}")
                                 else:
-                                    print(f"[COUNTDOWN] {person_name} in zone: {elapsed:.1f}/{self.countdown_duration}s")
+                                    pass
                             else:
                                 # Person left zone, reset countdown
                                 if self.waiting_person['entered_zone_time'] is not None:
-                                    print(f"[ZONE] {person_name} left zone, resetting countdown")
                                     self.waiting_person['entered_zone_time'] = None
 
             else:  # COLLECT
@@ -652,11 +621,10 @@ class PersonEmbeddingCollector:
                 self._stats['person_qwait_ms'].append(q_wait_ms)
                 self._stats['person_infer_ms'].append(infer_ms)
 
-                print(f"[PERSON] Detected {len(person_dets)} persons in {job.camera_id} camera")
 
                 if not person_dets or not self.active_collections:
                     if not person_dets:
-                        print(f"[PERSON] No person detections in {job.camera_id}")
+                        pass
                     continue
 
                 # For each active collection, try to collect from this camera
@@ -670,14 +638,11 @@ class PersonEmbeddingCollector:
 
                     # Pick best detection and embed inline
                     best = max(person_dets, key=lambda p: p['confidence'])
-                    print(f"[PERSON] Best detection confidence: {best['confidence']:.3f} bbox: {best['bbox']}")
 
                     crop = self.person_detector.get_person_crop(job.frame, best['bbox'], padding=10)
                     if crop is None:
-                        print(f"[CROP] Failed to extract person crop from {job.camera_id}")
                         continue
 
-                    print(f"[CROP] Extracted crop shape: {crop.shape} from {job.camera_id}")
 
                     # Convert BGR to RGB (GStreamer outputs BGR, but BPBreID expects RGB)
                     crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
@@ -687,13 +652,10 @@ class PersonEmbeddingCollector:
                     emb_time = (time.time() - t_emb_start) * 1000.0
 
                     if emb is None or visibility is None:
-                        print(f"[EMBEDDING] Failed to extract embedding for {person_name} from {job.camera_id}")
                         continue
 
-                    print(f"[EMBEDDING] Extracted embedding shape: {emb.shape}, visibility shape: {visibility.shape}, took {emb_time:.1f}ms for {person_name} from {job.camera_id}")
 
                     # Collect embeddings with augmentation on-the-fly
-                    print(f"[COLLECT] Collecting BPBreID embedding for {person_name} from {job.camera_id}")
                     with self.frame_collection_lock:
                         if person_name in self.active_collections:  # Double-check still active
                             cdata = self.active_collections[person_name]
@@ -745,10 +707,8 @@ class PersonEmbeddingCollector:
                             aug_time = (time.time() - t_aug_start) * 1000.0
 
                             if aug_emb is None or aug_visibility is None:
-                                print(f"[AUGMENT] Failed to extract embedding from {augmentation_type} augmented crop")
                                 continue
 
-                            print(f"[AUGMENT] Applied {augmentation_type} augmentation, extracted embedding in {aug_time:.1f}ms")
 
                             # Append augmented embedding with unsqueeze to add batch dimension
                             cam_data['embeddings'].append(aug_emb.unsqueeze(0))
@@ -762,7 +722,6 @@ class PersonEmbeddingCollector:
                             )
                             self.debug_counters['embedding_successes'] += 1
 
-                            print(f"[COLLECT] Collected {cam_data['frames_collected']}/25 for {person_name} from {job.camera_id} (aug: {augmentation_type})")
 
                             # If all cameras hit 25 frames, complete
                             done = all(v['frames_collected'] >= 25 for v in cdata['cameras'].values())
@@ -804,14 +763,13 @@ class PersonEmbeddingCollector:
         """
         for camera_id in ['center', 'right']:
             config = self.cameras[camera_id]['config']
-            print(f"Initializing {camera_id} camera: {config.get('name', config['url'])}")
 
             try:
                 self.create_camera_pipeline(camera_id, config)
                 # GStreamer documentation: Allow pipeline to stabilize before next
                 time.sleep(0.5)
             except Exception as e:
-                print(f"Error initializing {camera_id} camera: {e}")
+                pass
 
     def create_camera_pipeline(self, camera_id, config):
         """
@@ -833,7 +791,6 @@ class PersonEmbeddingCollector:
             self.cameras[camera_id]['appsink'] = appsink
 
         except Exception as e:
-            print(f"Error creating pipeline for {camera_id}: {e}")
             raise
 
     def on_new_sample(self, appsink, camera_id):
@@ -879,7 +836,7 @@ class PersonEmbeddingCollector:
                     buffer.unmap(map_info)
 
         except Exception as e:
-            print(f"Error in frame capture for {camera_id}: {e}")
+            pass
 
         return Gst.FlowReturn.OK
 
@@ -899,28 +856,27 @@ class PersonEmbeddingCollector:
 
         if msg_type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            print(f"Pipeline error for {camera_id}: {err}")
         elif msg_type == Gst.MessageType.STATE_CHANGED:
             if message.src == self.cameras[camera_id]['pipeline']:
                 old_state, new_state, pending_state = message.parse_state_changed()
                 if new_state == Gst.State.PLAYING:
                     self.cameras[camera_id]['playing'] = True
-                    print(f"Camera {camera_id} pipeline started")
 
         return True
 
-    def should_start_frame_collection(self, person_name):
+    def should_start_frame_collection(self, person_name, face_id):
         """
         Check if frame collection should start for a person.
 
         Args:
             person_name (str): Name of the person
+            face_id (str): Firebase user ID
 
         Returns:
             bool: True if collection should start, False otherwise
         """
         # Check if embeddings already exist for this person
-        if self.check_person_embeddings_exist(person_name):
+        if self.check_person_embeddings_exist(face_id):
             return False
 
         # Check if already collecting for this person on ANY camera
@@ -935,7 +891,7 @@ class PersonEmbeddingCollector:
 
         Args:
             person_name (str): Name of the person
-            face_id (int): Face ID from face_embeddings table
+            face_id (str): Firebase user ID from firebase_users table
             trigger_camera_id (str): Camera that triggered the collection
 
         Returns:
@@ -953,7 +909,6 @@ class PersonEmbeddingCollector:
                     },
                     'total_frames_collected': 0
                 }
-                print(f"Started frame collection for {person_name} (face_id={face_id}) on ALL cameras (triggered by {trigger_camera_id})")
                 return True
         return False
 
@@ -988,7 +943,7 @@ class PersonEmbeddingCollector:
             all_embeddings = torch.cat(all_embeddings_list, dim=0)
             all_visibility = torch.cat(all_visibility_list, dim=0)
 
-            # PRIMARY: save to memory
+            # PRIMARY: save to memory (use firebase user ID directly as gallery key)
             self.live_gallery.add_person(
                 pid=face_id,
                 embeddings=all_embeddings,
@@ -1008,8 +963,6 @@ class PersonEmbeddingCollector:
             if cam_data['frames_collected'] > 0
         ])
 
-        print(f"Completed frame collection for {person_name}: "
-              f"{total_frames} embeddings collected ({camera_summary})")
 
     def cleanup_stale_collections(self):
         """
@@ -1121,7 +1074,6 @@ class PersonEmbeddingCollector:
                     time.sleep(0.01)
 
             except Exception as e:
-                print(f"Error in processing thread for {camera_id}: {e}")
                 time.sleep(0.1)
 
     def draw_detections(self, frame, detections, camera_id):
@@ -1486,18 +1438,13 @@ class PersonEmbeddingCollector:
         # Start pipelines sequentially (GStreamer best practice)
         for camera_id in ['center', 'right']:
             try:
-                print(f"[DEBUG] About to start {camera_id} pipeline...")
                 pipeline = self.cameras[camera_id]['pipeline']
-                print(f"[DEBUG] Setting {camera_id} to PLAYING state...")
                 ret = pipeline.set_state(Gst.State.PLAYING)
-                print(f"[DEBUG] {camera_id} set_state returned: {ret}")
                 if ret == Gst.StateChangeReturn.FAILURE:
-                    print(f"Failed to start {camera_id} camera")
+                    pass
                 # GStreamer documentation: serialize pipeline startup
-                print(f"[DEBUG] Waiting after {camera_id} start...")
                 time.sleep(1.0)
             except Exception as e:
-                print(f"Error starting {camera_id}: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -1550,7 +1497,6 @@ class PersonEmbeddingCollector:
         Returns:
             None
         """
-        print("Stopping system...")
         self.running = False
 
         # Give threads time to see running=False
@@ -1564,18 +1510,16 @@ class PersonEmbeddingCollector:
 
         # Wait for GPU worker thread to finish
         if self.gpu_worker_thread and self.gpu_worker_thread.is_alive():
-            print("Waiting for GPU worker thread to finish...")
             self.gpu_worker_thread.join(timeout=3.0)
             if self.gpu_worker_thread.is_alive():
-                print("Warning: GPU worker thread did not finish cleanly")
+                pass
 
         # Close Redis connection
         if self.redis_client is not None:
             try:
                 self.redis_client.close()
-                print("[REDIS] Connection closed")
             except Exception as e:
-                print(f"[REDIS] Error closing connection: {e}")
+                pass
 
         # Stop camera pipelines
         for camera_id in ['center', 'right']:
@@ -1586,12 +1530,10 @@ class PersonEmbeddingCollector:
 
                 thread = self.cameras[camera_id].get('thread')
                 if thread and thread.is_alive():
-                    print(f"Waiting for {camera_id} processing thread to finish...")
                     thread.join(timeout=2.0)
                     if thread.is_alive():
-                        print(f"Warning: {camera_id} thread did not finish cleanly")
+                        pass
             except Exception as e:
-                print(f"Error stopping {camera_id}: {e}")
+                pass
 
         cv2.destroyAllWindows()
-        print("System stopped")
